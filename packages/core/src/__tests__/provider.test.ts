@@ -3,6 +3,7 @@ import type { AssistantMessage, Model, Api } from "@mariozechner/pi-ai";
 import {
   __resetFixedTemperatureWarnings,
   chatCompletion,
+  fitMaxTokensToContextWindow,
   type LLMClient,
 } from "../llm/provider.js";
 
@@ -165,10 +166,11 @@ describe("chatCompletion via pi-ai", () => {
 
     const client = makeClient();
     const error = await captureError(
-      chatCompletion(client, "test-model", [{ role: "user", content: "ping" }]),
+      chatCompletion(client, "test-model", [{ role: "user", content: "ping" }], { retry: false }),
     );
 
     expect(error.message).toContain("empty response");
+    expect(error.name).toBe("EmptyResponseError");
   });
 
   it("wraps 400 API errors with a user-friendly message", async () => {
@@ -294,6 +296,28 @@ describe("chatCompletion via pi-ai", () => {
     expect(error.message).toContain("compress");
     expect(mockStreamSimple).not.toHaveBeenCalled();
     expect(mockCompleteSimple).not.toHaveBeenCalled();
+  });
+
+  it("clamps reserved output so input + maxTokens fit the context window", async () => {
+    mockStreamSimple.mockReturnValue(makeTextStream("ok"));
+
+    const client = makeClient(0.7, {
+      defaults: { temperature: 0.7, maxTokens: 800, thinkingBudget: 0, extra: {} },
+      _piModel: {
+        ...MOCK_PI_MODEL,
+        contextWindow: 1_000,
+        maxTokens: 800,
+      },
+    });
+
+    // ~500 CJK tokens; without clamping, 500 + 800 would exceed the 1000 window.
+    await chatCompletion(client, "test-model", [
+      { role: "user", content: "字".repeat(500) },
+    ], { maxTokens: 800 });
+
+    const opts = mockStreamSimple.mock.calls[0]?.[2] as { maxTokens?: number };
+    expect(opts.maxTokens).toBeLessThanOrEqual(500);
+    expect(opts.maxTokens).toBeGreaterThan(0);
   });
 
   it("calls onTextDelta for each text chunk", async () => {
@@ -953,7 +977,41 @@ describe("createLLMClient per-call maxTokens not capped (v2.0.0)", () => {
   });
 });
 
+describe("fitMaxTokensToContextWindow", () => {
+  it("leaves room for input inside the context window", () => {
+    expect(fitMaxTokensToContextWindow({
+      contextWindow: 262_144,
+      estimatedInputTokens: 21_300,
+      requestedMaxTokens: 262_144,
+    })).toBe(262_144 - 21_300);
+  });
+
+  it("returns 0 when input already fills the window", () => {
+    expect(fitMaxTokensToContextWindow({
+      contextWindow: 1000,
+      estimatedInputTokens: 1200,
+      requestedMaxTokens: 500,
+    })).toBe(0);
+  });
+});
+
 describe("createLLMClient with providers lookup", () => {
+  it("openrouter Nemotron Super :free caps maxOutput below full context", async () => {
+    const { createLLMClient } = await import("../llm/provider.js");
+    const { LLMConfigSchema } = await import("../models/project.js");
+    const client = createLLMClient(LLMConfigSchema.parse({
+      provider: "openai",
+      service: "openrouter",
+      model: "nvidia/nemotron-3-super-120b-a12b:free",
+      apiKey: "test",
+      baseUrl: "https://openrouter.ai/api/v1",
+    }));
+    expect(client.defaults.maxTokens).toBe(65_536);
+    expect(client._piModel?.maxTokens).toBe(65_536);
+    expect(client._piModel?.contextWindow).toBe(262_144);
+    expect(client.defaults.maxTokens).toBeLessThan(client._piModel!.contextWindow);
+  });
+
   it("anthropic + claude-sonnet-4-6 拿到 modelCard 的 maxOutput (64000)，不是未知模型兜底", async () => {
     const { createLLMClient } = await import("../llm/provider.js");
     const { LLMConfigSchema } = await import("../models/project.js");
@@ -1291,7 +1349,8 @@ describe("rate-limit minute backoff", () => {
     expect(onTextDelta).toHaveBeenCalledWith("流式成功");
   });
 
-  it("does not retry mid-stream truncation when onTextDelta is set", async () => {
+  it("retries mid-stream truncation as a full rewrite when onTextDelta is set", async () => {
+    vi.useFakeTimers();
     const encoder = new TextEncoder();
     const truncated = {
       ok: true,
@@ -1304,19 +1363,25 @@ describe("rate-limit minute backoff", () => {
         },
       }),
     };
-    const fetchMock = vi.fn().mockResolvedValue(truncated);
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(truncated)
+      .mockResolvedValueOnce(okSseResponse("完整一章"));
     vi.stubGlobal("fetch", fetchMock);
+    const onTextDelta = vi.fn();
 
-    await expect(
-      chatCompletion(
-        streamNativeClient(),
-        "glm-4.7-flash",
-        [{ role: "user", content: "写" }],
-        { onTextDelta: vi.fn() },
-      ),
-    ).rejects.toThrow(/Stream interrupted|completion signal/);
+    const resultPromise = chatCompletion(
+      streamNativeClient(),
+      "glm-4.7-flash",
+      [{ role: "user", content: "写" }],
+      { onTextDelta },
+    );
+    await vi.advanceTimersByTimeAsync(1_000);
+    const result = await resultPromise;
 
-    // rateLimitOnly: mid-stream truncation must not be retried (would duplicate UI text)
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(result.content).toBe("完整一章");
+    // First attempt truncated → rewrite once after ~1s
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(onTextDelta).toHaveBeenCalledWith("写到一半");
+    expect(onTextDelta).toHaveBeenCalledWith("完整一章");
   });
 });

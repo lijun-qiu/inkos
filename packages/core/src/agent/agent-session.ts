@@ -15,7 +15,12 @@ import type {
   UserMessage,
 } from "@mariozechner/pi-ai";
 import type { PipelineRunner } from "../pipeline/runner.js";
-import { assertWithinContextWindow, estimatePiContextTokens } from "../llm/provider.js";
+import {
+  assertWithinContextWindow,
+  ContextWindowExceededError,
+  estimatePiContextTokens,
+  fitMaxTokensToContextWindow,
+} from "../llm/provider.js";
 import { buildAgentSystemPrompt } from "./agent-system-prompt.js";
 import {
   createPatchChapterTextTool,
@@ -347,18 +352,35 @@ function guardedStreamSimple<TApi extends Api>(
   context: PiContext,
   options?: SimpleStreamOptions,
 ): AssistantMessageEventStream {
-  const reservedOutputTokens = Number.isFinite(options?.maxTokens)
+  const requestedMaxTokens = Number.isFinite(options?.maxTokens)
     ? options!.maxTokens!
     : Number.isFinite(model.maxTokens)
       ? model.maxTokens
       : 4096;
+  const estimatedInputTokens = estimatePiContextTokens(context);
+  const reservedOutputTokens = fitMaxTokensToContextWindow({
+    contextWindow: model.contextWindow,
+    estimatedInputTokens,
+    requestedMaxTokens,
+  });
   assertWithinContextWindow({
     piModel: model,
     model: model.id,
-    estimatedInputTokens: estimatePiContextTokens(context),
+    estimatedInputTokens,
     reservedOutputTokens,
   });
-  return streamSimple(model, context, options);
+  if (reservedOutputTokens <= 0) {
+    throw new ContextWindowExceededError({
+      estimatedInputTokens,
+      reservedOutputTokens: requestedMaxTokens,
+      contextWindow: model.contextWindow,
+      model: model.id,
+    });
+  }
+  return streamSimple(model, context, {
+    ...options,
+    maxTokens: reservedOutputTokens,
+  });
 }
 
 function localAssistantStopStream(model: Model<Api>): AssistantMessageEventStream {

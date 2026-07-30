@@ -35,6 +35,13 @@ const UNKNOWN_MODEL_FALLBACK_MAX_TOKENS = 8192 * 3;
 /** Extra attempts after the first failure for generic transient HTTP/transport errors. */
 const TRANSIENT_LLM_RETRIES = 2;
 /**
+ * Extra attempts after the first failure for mid-stream PartialResponseError
+ * (full rewrite). Free OpenRouter routes often drop long Ultra streams.
+ */
+const PARTIAL_RESPONSE_LLM_RETRIES = 3;
+/** Backoff before each stream-rewrite attempt (ms): 1s → 3s → 10s. */
+const PARTIAL_RESPONSE_BACKOFF_MS = [1_000, 3_000, 10_000] as const;
+/**
  * Extra attempts after the first failure for rate-limit (429) errors.
  * Sized to cover ~1–2 full free-Flash rotations plus long backoff.
  */
@@ -189,9 +196,10 @@ export interface LLMClient {
 export function createLLMClient(config: LLMConfig): LLMClient {
   // C1 (v2.0.0)：config.maxTokens / maxTokensCap 已删除；defaults.maxTokens 完全从 modelCard 推导。
   const _earlyCard = lookupModel(config.service ?? "custom", config.model);
+  const _earlyMax = _earlyCard?.maxOutput ?? UNKNOWN_MODEL_FALLBACK_MAX_TOKENS;
   const defaults = {
     temperature: config.temperature ?? 0.7,
-    maxTokens: _earlyCard?.maxOutput ?? UNKNOWN_MODEL_FALLBACK_MAX_TOKENS,
+    maxTokens: _earlyMax,
     thinkingBudget: config.thinkingBudget ?? 0,
     extra: config.extra ?? {},
   };
@@ -328,6 +336,18 @@ export class PartialResponseError extends Error {
     super(`Stream interrupted after ${partialContent.length} chars: ${String(cause)}`);
     this.name = "PartialResponseError";
     this.partialContent = partialContent;
+  }
+}
+
+/** Upstream finished with no usable text (common on free reasoning models). */
+export class EmptyResponseError extends Error {
+  constructor(detail?: string) {
+    super(
+      detail?.trim()
+        ? `LLM returned empty response from stream (${detail})`
+        : "LLM returned empty response from stream",
+    );
+    this.name = "EmptyResponseError";
   }
 }
 
@@ -690,9 +710,10 @@ async function withTransientLLMRetry<T>(
     readonly enabled?: boolean;
     readonly signal?: AbortSignal;
     /**
-     * When true (streaming text/thinking deltas already wired to UI), only retry
-     * clear rate-limit errors. Those fail before any chunk is emitted; retrying
-     * mid-stream PartialResponse/502 would duplicate visible deltas.
+     * When true (streaming text/thinking deltas already wired to UI), still retry
+     * rate-limits and mid-stream PartialResponseError (full rewrite). Do not retry
+     * generic mid-stream 502/transport blips that aren't wrapped as PartialResponse —
+     * those are ambiguous and could duplicate visible deltas without a clean restart.
      */
     readonly rateLimitOnly?: boolean;
     /** Length of Zhipu (or other) model rotation pool; enables short hop delays. */
@@ -716,12 +737,17 @@ async function withTransientLLMRetry<T>(
       lastError = error;
       const rateLimited = isRateLimitLLMError(error);
       const maxTokensParamError = isZhipuMaxTokensParamError(error);
+      const partialResponse = error instanceof PartialResponseError;
+      const emptyResponse = error instanceof EmptyResponseError
+        || (error instanceof Error && /LLM returned empty response/i.test(error.message));
       const maxRetries = (rateLimited || maxTokensParamError)
         ? RATE_LIMIT_LLM_RETRIES
-        : TRANSIENT_LLM_RETRIES;
+        : (partialResponse || emptyResponse)
+          ? PARTIAL_RESPONSE_LLM_RETRIES
+          : TRANSIENT_LLM_RETRIES;
       const retryable = options?.rateLimitOnly
-        ? (rateLimited || maxTokensParamError)
-        : (isRetryableLLMError(error) || maxTokensParamError);
+        ? (rateLimited || maxTokensParamError || partialResponse || emptyResponse)
+        : (isRetryableLLMError(error) || maxTokensParamError || emptyResponse);
       if (!enabled || attempt >= maxRetries || !retryable) {
         throw error;
       }
@@ -739,6 +765,16 @@ async function withTransientLLMRetry<T>(
         console.warn(
           `[llm] ${maxTokensParamError ? "max_tokens rejected" : "429 rate limit"} — waiting ${Math.round(delayMs / 1000)}s before retry ${attempt + 1}/${maxRetries}`
           + (switched ? " (model rotated)" : ""),
+        );
+        await abortableDelay(delayMs, options?.signal);
+      } else if (partialResponse || emptyResponse) {
+        const delayMs = PARTIAL_RESPONSE_BACKOFF_MS[
+          Math.min(attempt, PARTIAL_RESPONSE_BACKOFF_MS.length - 1)
+        ]!;
+        console.warn(
+          partialResponse
+            ? `[llm] stream interrupted after ${(error as PartialResponseError).partialContent.length} chars — rewriting attempt ${attempt + 1}/${maxRetries} after ${Math.round(delayMs / 1000)}s`
+            : `[llm] empty LLM response — rewriting attempt ${attempt + 1}/${maxRetries} after ${Math.round(delayMs / 1000)}s`,
         );
         await abortableDelay(delayMs, options?.signal);
       } else {
@@ -880,6 +916,21 @@ function defaultOpenAIChatExtra(client: LLMClient, model: string): Record<string
     // Gemini 3.x defaults to medium thinking; keep it minimal for novel drafting
     // so output tokens aren't burned on hidden thoughts.
     return { reasoning_effort: "minimal" };
+  }
+  if (client.service === "openrouter") {
+    // Explicit thinkingBudget > 0 keeps light reasoning available for callers that opt in.
+    if ((client.defaults.thinkingBudget ?? 0) > 0) {
+      return { reasoning: { effort: "minimal" } };
+    }
+    // Writing stack (Ultra): disable reasoning — long free-route thoughts burn
+    // completion tokens and wall time. Planning/audit stack (Super): light thinking.
+    if (/nemotron-3-ultra/i.test(model)) {
+      return { reasoning: { effort: "none" } };
+    }
+    if (/nemotron-3-super/i.test(model)) {
+      return { reasoning: { effort: "minimal" } };
+    }
+    return { reasoning: { effort: "none" } };
   }
   return {};
 }
@@ -1073,10 +1124,27 @@ function resolveCallMaxTokens(
 ): number {
   const card = lookupModel(client.service ?? "custom", model);
   const cardMax = card?.maxOutput ?? client.defaults.maxTokens;
+  // Per-call fitMaxTokensToContextWindow clamps reserved output to remaining room.
   if (explicit === undefined) return cardMax;
   // Never send above the provider card — Zhipu returns HTTP 400 (code 1210)
   // when max_tokens exceeds the model-specific cap (e.g. glm-4-flash-250414 ≤ 16384).
   return Math.min(explicit, cardMax);
+}
+
+/** Clamp max_tokens so input + reserved output fit in the context window. */
+export function fitMaxTokensToContextWindow(params: {
+  readonly contextWindow: number;
+  readonly estimatedInputTokens: number;
+  readonly requestedMaxTokens: number;
+}): number {
+  const { contextWindow, estimatedInputTokens, requestedMaxTokens } = params;
+  if (!Number.isFinite(contextWindow) || contextWindow <= 0) {
+    return requestedMaxTokens;
+  }
+  // Always keep ≥1 token of headroom for real input — OpenRouter rejects
+  // max_tokens === context_length even when the prompt is only a few tokens.
+  const room = Math.max(0, contextWindow - Math.max(1, estimatedInputTokens));
+  return Math.min(requestedMaxTokens, room);
 }
 
 function resolveOllamaNumCtx(client: LLMClient, model: string): number {
@@ -1260,7 +1328,7 @@ async function chatCompletionViaCustomAnthropicCompatible(
     const json = await response.json() as any;
     const content = extractAnthropicContent(json);
     if (!content) {
-      throw wrapLLMError(new Error("LLM returned empty response"), errorCtx);
+      throw wrapLLMError(new EmptyResponseError(), errorCtx);
     }
     return {
       content,
@@ -1313,7 +1381,7 @@ async function chatCompletionViaCustomAnthropicCompatible(
   }
 
   if (!content) {
-    throw wrapLLMError(new Error("LLM returned empty response from stream"), errorCtx);
+    throw wrapLLMError(new EmptyResponseError(), errorCtx);
   }
   if (!sawMessageStop) {
     // Anthropic 协议的正常结束必须有 message_stop；没有就是流被中途掐断
@@ -1371,7 +1439,7 @@ async function chatCompletionViaCustomOpenAICompatible(
       const json = await response.json() as any;
       const content = extractResponsesContent(json);
       if (!content) {
-        throw wrapLLMError(new Error("LLM returned empty response"), errorCtx);
+        throw wrapLLMError(new EmptyResponseError(), errorCtx);
       }
       return {
         content,
@@ -1425,7 +1493,7 @@ async function chatCompletionViaCustomOpenAICompatible(
     }
 
     if (!content) {
-      throw wrapLLMError(new Error("LLM returned empty response from stream"), errorCtx);
+      throw wrapLLMError(new EmptyResponseError(), errorCtx);
     }
     if (!sawResponseTerminal) {
       // Responses 协议的正常结束必须有 response.completed/incomplete 终止事件
@@ -1492,7 +1560,7 @@ async function chatCompletionViaCustomOpenAICompatible(
     if (reasoningOnly) onThinkingDelta?.(reasoningOnly);
     const content = stripLeadingThinkBlock(rawContent);
     if (!content) {
-      throw wrapLLMError(new Error("LLM returned empty response"), errorCtx);
+      throw wrapLLMError(new EmptyResponseError(), errorCtx);
     }
     return {
       content,
@@ -1575,7 +1643,7 @@ async function chatCompletionViaCustomOpenAICompatible(
   content += thinkStripper.flush();
   const finalContent = content || reasoningContent;
   if (!finalContent) {
-    throw wrapLLMError(new Error("LLM returned empty response from stream"), errorCtx);
+    throw wrapLLMError(new EmptyResponseError(), errorCtx);
   }
   if (!sawTerminal) {
     throw new PartialResponseError(finalContent, new Error("stream closed without [DONE]/finish_reason"));
@@ -1625,21 +1693,37 @@ export async function chatCompletion(
         signal?.throwIfAborted();
         const callModel = activeModel;
         errorCtx.model = callModel;
+        const piModel = resolvePiModel(client, callModel);
+        const estimatedInputTokens = estimateLLMMessagesTokens(messages);
+        const requestedMaxTokens = resolveCallMaxTokens(client, callModel, options?.maxTokens);
+        const maxTokens = fitMaxTokensToContextWindow({
+          contextWindow: piModel.contextWindow,
+          estimatedInputTokens,
+          requestedMaxTokens,
+        });
         const resolved = {
           temperature: clampTemperatureForModel(
             client.service,
             callModel,
             options?.temperature ?? client.defaults.temperature,
           ),
-          maxTokens: resolveCallMaxTokens(client, callModel, options?.maxTokens),
+          maxTokens,
           extra: client.defaults.extra,
         };
         assertWithinContextWindow({
-          piModel: resolvePiModel(client, callModel),
+          piModel,
           model: callModel,
-          estimatedInputTokens: estimateLLMMessagesTokens(messages),
+          estimatedInputTokens,
           reservedOutputTokens: resolved.maxTokens,
         });
+        if (resolved.maxTokens <= 0) {
+          throw new ContextWindowExceededError({
+            estimatedInputTokens,
+            reservedOutputTokens: requestedMaxTokens,
+            contextWindow: piModel.contextWindow,
+            model: callModel,
+          });
+        }
         if (shouldUseNativeCustomTransport(client)) {
           return chatCompletionViaCustomOpenAICompatible(
             client, callModel, messages, resolved, onStreamProgress, onTextDelta, signal, true, onThinkingDelta,
@@ -1649,7 +1733,7 @@ export async function chatCompletion(
           client, callModel, messages, resolved, onStreamProgress, onTextDelta, signal, onThinkingDelta,
         );
       },
-      // With stream deltas: only 429/rate-limit (fails before chunks). Callers can
+      // With stream deltas: still rewrite on PartialResponseError / 429. Callers can
       // opt out entirely (e.g. fast-fail diagnostics via retry: false).
       {
         enabled: options?.retry ?? true,
@@ -1762,7 +1846,7 @@ async function chatCompletionViaPiAi(
     if (!content) {
       const diag = `usage=${response.usage.input}+${response.usage.output}`;
       console.warn(`[inkos] LLM 非流式响应无文本内容 (${diag})`);
-      throw new Error(`LLM returned empty response (${diag})`);
+      throw new EmptyResponseError(diag);
     }
     return {
       content,
@@ -1843,7 +1927,7 @@ async function chatCompletionViaPiAi(
   if (!content) {
     const diag = `usage=${inputTokens}+${outputTokens}`;
     console.warn(`[inkos] LLM 流式响应无文本内容 (${diag})`);
-    throw new Error(`LLM returned empty response from stream (${diag})`);
+    throw new EmptyResponseError(diag);
   }
   if (!sawDone) {
     // 事件流没有以 done 收尾就结束 = 上游把流掐断了，内容不可信

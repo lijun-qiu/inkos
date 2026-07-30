@@ -189,3 +189,55 @@ describe("MiniMax thinking leak prevention (issue #329)", () => {
     expect(deltas.join("")).not.toContain("内心推理");
   });
 });
+
+describe("OpenRouter reasoning defaults", () => {
+  it("disables reasoning for Ultra writing models", async () => {
+    fetchCalls.length = 0;
+    const client = createLLMClient({
+      provider: "openai",
+      service: "openrouter",
+      model: "nvidia/nemotron-3-ultra-550b-a55b:free",
+      apiKey: "sk-or",
+      apiFormat: "chat",
+      stream: false,
+      temperature: 0.7,
+      thinkingBudget: 0,
+      baseUrl: "https://openrouter.ai/api/v1",
+      extra: {},
+    } as never);
+
+    await chatCompletion(client, "nvidia/nemotron-3-ultra-550b-a55b:free", [
+      { role: "user", content: "hi" },
+    ], { retry: false });
+
+    expect(fetchCalls).toHaveLength(1);
+    expect(fetchCalls[0]!.body).toMatchObject({
+      reasoning: { effort: "none" },
+    });
+  });
+
+  it("uses minimal reasoning for Super planning/audit models", async () => {
+    fetchCalls.length = 0;
+    const client = createLLMClient({
+      provider: "openai",
+      service: "openrouter",
+      model: "nvidia/nemotron-3-super-120b-a12b:free",
+      apiKey: "sk-or",
+      apiFormat: "chat",
+      stream: false,
+      temperature: 0.7,
+      thinkingBudget: 0,
+      baseUrl: "https://openrouter.ai/api/v1",
+      extra: {},
+    } as never);
+
+    await chatCompletion(client, "nvidia/nemotron-3-super-120b-a12b:free", [
+      { role: "user", content: "hi" },
+    ], { retry: false });
+
+    expect(fetchCalls).toHaveLength(1);
+    expect(fetchCalls[0]!.body).toMatchObject({
+      reasoning: { effort: "minimal" },
+    });
+  });
+});

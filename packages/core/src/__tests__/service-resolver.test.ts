@@ -225,4 +225,25 @@ describe("resolveServiceModel", () => {
     expect(result.model.contextWindow).toBe(204800);
     expect(result.model.maxTokens).toBe(131072);
   });
+
+  it("openrouter Nemotron Super uses bank maxOutput below full context", async () => {
+    await mkdir(join(root, ".inkos"), { recursive: true });
+    await writeFile(
+      join(root, ".inkos", "secrets.json"),
+      JSON.stringify({ services: { openrouter: { apiKey: "sk-or" } } }),
+    );
+
+    const result = await resolveServiceModel(
+      "openrouter",
+      "nvidia/nemotron-3-super-120b-a12b:free",
+      root,
+      "https://openrouter.ai/api/v1",
+      "chat",
+    );
+
+    expect(result.model.api).toBe("openai-completions");
+    expect(result.model.contextWindow).toBe(262_144);
+    expect(result.model.maxTokens).toBe(65_536);
+    expect(result.model.maxTokens).toBeLessThan(result.model.contextWindow);
+  });
 });

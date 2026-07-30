@@ -235,16 +235,32 @@ ${chapterContent}`;
     try {
       const parsed = JSON.parse(text) as {
         warnings?: Array<{ category?: string; description?: string }>;
+        issues?: Array<string | { category?: string; description?: string; message?: string }>;
         passed?: boolean;
+        consistent?: boolean;
       };
-      if (typeof parsed.passed !== "boolean") return null;
-      return {
-        warnings: (parsed.warnings ?? []).map((w) => ({
+      const passed = typeof parsed.passed === "boolean"
+        ? parsed.passed
+        : typeof parsed.consistent === "boolean"
+          ? parsed.consistent
+          : null;
+      if (passed === null) return null;
+      const warnings = [
+        ...(parsed.warnings ?? []).map((w) => ({
           category: w.category ?? "unknown",
           description: w.description ?? "",
         })),
-        passed: parsed.passed,
-      };
+        ...(parsed.issues ?? []).map((issue) => {
+          if (typeof issue === "string") {
+            return { category: "general", description: issue };
+          }
+          return {
+            category: issue.category ?? "general",
+            description: issue.description ?? issue.message ?? "",
+          };
+        }),
+      ];
+      return { warnings, passed };
     } catch {
       return null;
     }

@@ -37,13 +37,17 @@ export async function resolveServiceModel(
   const preset = resolveServicePreset(baseService);
   const endpoint = getEndpoint(baseService);
   const piProvider = baseService === "ollama" ? "ollama" : resolveServicePiProvider(baseService) ?? "openai";
-  const apiType = service.startsWith("custom:")
+  // Prefer explicit per-service apiFormat (e.g. openrouter chat → openai-completions)
+  // over the endpoint preset default (openrouter bank still lists openai-responses).
+  const apiType = customApiFormat
     ? (customApiFormat === "responses" ? "openai-responses" : "openai-completions")
-    : (preset?.api ?? "openai-completions");
+    : service.startsWith("custom:")
+      ? "openai-completions"
+      : (preset?.api ?? "openai-completions");
   const configuredBaseUrl = customBaseUrl ?? preset?.baseUrl ?? "";
-  const endpointModel = baseService === "minimax"
-    ? endpoint?.models.find((model) => model.id === modelId || model.deploymentName === modelId)
-    : undefined;
+  const endpointModel = endpoint?.models.find(
+    (model) => model.id === modelId || model.deploymentName === modelId,
+  );
 
   // Get pi-ai Model — may return undefined for model IDs not in the built-in registry
   const piModel = getModel(piProvider as any, modelId as any) as Model<Api> | undefined;
@@ -71,6 +75,12 @@ export async function resolveServiceModel(
     );
   }
 
+  const contextWindow = endpointModel?.contextWindowTokens
+    ?? piModel?.contextWindow
+    ?? 128_000;
+  const maxTokens = endpointModel?.maxOutput ?? piModel?.maxTokens ?? 16_384;
+  // Remaining room is enforced per call by fitMaxTokensToContextWindow.
+
   const model: Model<Api> = {
     id: modelId,
     name: piModel?.name ?? modelId,
@@ -80,8 +90,8 @@ export async function resolveServiceModel(
     reasoning: piModel?.reasoning ?? false,
     input: piModel?.input ?? ["text"] as ("text" | "image")[],
     cost: piModel?.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: endpointModel?.contextWindowTokens ?? piModel?.contextWindow ?? 0,
-    maxTokens: endpointModel?.maxOutput ?? piModel?.maxTokens ?? 16384,
+    contextWindow,
+    maxTokens,
     ...(compat ? { compat: compat as Model<Api>["compat"] } : {}),
   };
 

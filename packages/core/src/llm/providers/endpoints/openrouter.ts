@@ -20,12 +20,16 @@ export const OPENROUTER: InkosEndpoint = {
   baseUrl: "https://openrouter.ai/api/v1",
   // openrouter/auto 是 OpenRouter 官方的自动路由入口，长期存在；
   // 具体模型 id（如 google/gemma-2-9b-it:free）会随上游下架失效（issue #300）。
-  checkModel: "nvidia/nemotron-3-ultra-550b-a55b:free",
+  checkModel: "nvidia/nemotron-3-super-120b-a12b:free",
   temperatureRange: [0, 2],
   defaultTemperature: 0.7,
   writingTemperature: 1,
   models: [
-    { id: "nvidia/nemotron-3-ultra-550b-a55b:free", maxOutput: 65536, contextWindowTokens: 262144, enabled: true, releasedAt: "2026-04-01" },
+    { id: "nvidia/nemotron-3-ultra-550b-a55b:free", maxOutput: 65536, contextWindowTokens: 1000000, enabled: true, releasedAt: "2026-04-01" },
+    // OpenRouter free Super lists max_completion_tokens=262144 (= context). Sending
+    // that as max_tokens 400s once any input tokens exist (input+output > context).
+    // Cap below the window; per-call fitMaxTokens still shrinks further for large prompts.
+    { id: "nvidia/nemotron-3-super-120b-a12b:free", maxOutput: 65536, contextWindowTokens: 262144, enabled: true, releasedAt: "2026-03-11" },
     { id: "openrouter/auto", maxOutput: 4096, contextWindowTokens: 2000000, enabled: true },
     { id: "deepseek/deepseek-chat-v3.1", maxOutput: 4096, contextWindowTokens: 163840, releasedAt: "2025-08-21" },
     { id: "google/gemini-3.1-flash-image-preview", maxOutput: 65536, contextWindowTokens: 131072, releasedAt: "2026-02-26" },
