@@ -56,4 +56,13 @@ describe("createLeadingThinkTagStripper", () => {
     expect(emitted).toEqual([]);
     expect(flushed).toBe("<think>推理没有闭合");
   });
+
+  it("reports stripped think content via onThinking", () => {
+    const thoughts: string[] = [];
+    const stripper = createLeadingThinkTagStripper({
+      onThinking: (text) => thoughts.push(text),
+    });
+    expect(stripper.push("<think>先分析冲突</think>\n正文")).toBe("正文");
+    expect(thoughts).toEqual(["先分析冲突"]);
+  });
 });

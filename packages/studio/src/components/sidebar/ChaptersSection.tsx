@@ -16,6 +16,8 @@ const STATUS_INDICATOR: Record<string, { symbol: string; color: string }> = {
   "ready-for-review": { symbol: "◆", color: "text-amber-500" },
   drafted: { symbol: "○", color: "text-muted-foreground" },
   "needs-revision": { symbol: "✕", color: "text-destructive" },
+  "audit-failed": { symbol: "!", color: "text-destructive" },
+  "state-degraded": { symbol: "!", color: "text-amber-500" },
   imported: { symbol: "◇", color: "text-blue-500" },
 };
 

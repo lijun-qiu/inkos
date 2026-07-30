@@ -24,14 +24,42 @@ export interface StreamProgress {
   readonly elapsedMs: number;
   readonly totalChars: number;
   readonly chineseChars: number;
-  readonly status: "streaming" | "done";
+  readonly status: "thinking" | "streaming" | "done";
 }
 
 export type OnStreamProgress = (progress: StreamProgress) => void;
+export type OnThinkingDelta = (text: string) => void;
 
 const INKOS_USER_AGENT = "InkOS/1.3.5";
 const UNKNOWN_MODEL_FALLBACK_MAX_TOKENS = 8192 * 3;
+/** Extra attempts after the first failure for generic transient HTTP/transport errors. */
 const TRANSIENT_LLM_RETRIES = 2;
+/**
+ * Extra attempts after the first failure for rate-limit (429) errors.
+ * Sized to cover ~1–2 full free-Flash rotations plus long backoff.
+ */
+const RATE_LIMIT_LLM_RETRIES = 6;
+/** Backoff after a full model-rotation cycle (ms): 1min → 2min → 3min. */
+const RATE_LIMIT_BACKOFF_MS = [60_000, 120_000, 180_000] as const;
+/** Short pause when hopping to the next Zhipu free Flash model on 429. */
+const RATE_LIMIT_MODEL_ROTATE_DELAY_MS = 8_000;
+/**
+ * Kept for tests/call sites. Rotation is intentionally disabled: a 429 must not
+ * silently switch to a weaker free Flash model (short chapters / quality drop).
+ * Callers stay on the configured primary until retries exhaust, then fail hard.
+ */
+export const ZHIPU_FREE_FLASH_ROTATION = [
+  "glm-4-flash",
+  "glm-4-flash-250414",
+  "glm-4.6v-flash",
+] as const;
+/** Practical Ollama context for writing agents; full model cards may claim 128k+. */
+const OLLAMA_DEFAULT_NUM_CTX = 32_768;
+
+/** No cross-model hop — always the configured primary only. */
+export function buildZhipuRateLimitModelRotation(primary: string): string[] {
+  return [primary];
+}
 
 function isByteString(value: string): boolean {
   for (let i = 0; i < value.length; i++) {
@@ -62,9 +90,13 @@ function mergeUserAgent(headers?: Record<string, string>): Record<string, string
 export function createStreamMonitor(
   onProgress?: OnStreamProgress,
   intervalMs: number = 30000,
-): { readonly onChunk: (text: string) => void; readonly stop: () => void } {
+): {
+  readonly onChunk: (text: string, kind?: "text" | "thinking") => void;
+  readonly stop: () => void;
+} {
   let totalChars = 0;
   let chineseChars = 0;
+  let phase: "thinking" | "streaming" = "streaming";
   const startTime = Date.now();
   let timer: ReturnType<typeof setInterval> | undefined;
 
@@ -74,15 +106,25 @@ export function createStreamMonitor(
         elapsedMs: Date.now() - startTime,
         totalChars,
         chineseChars,
-        status: "streaming",
+        status: phase,
       });
     }, intervalMs);
   }
 
   return {
-    onChunk(text: string): void {
+    onChunk(text: string, kind: "text" | "thinking" = "text"): void {
+      phase = kind === "thinking" ? "thinking" : "streaming";
       totalChars += text.length;
       chineseChars += (text.match(/[\u4e00-\u9fff]/g) || []).length;
+      if (kind === "thinking") {
+        // Emit promptly so Studio can show "思考中" without waiting for the interval.
+        onProgress?.({
+          elapsedMs: Date.now() - startTime,
+          totalChars,
+          chineseChars,
+          status: "thinking",
+        });
+      }
     },
     stop(): void {
       if (timer !== undefined) {
@@ -163,9 +205,22 @@ export function createLLMClient(config: LLMConfig): LLMClient {
   const inkosProvider = getEndpoint(serviceName);
   const modelCard = lookupModel(serviceName, config.model);
 
-  const piApi = resolvePiApi(serviceName, config.apiFormat, (inkosProvider?.api ?? preset?.api) as PiApi) as PiApi;
-  const baseUrl = config.baseUrl || inkosProvider?.baseUrl || preset?.baseUrl || "";
+  const piApiRaw = resolvePiApi(serviceName, config.apiFormat, (inkosProvider?.api ?? preset?.api) as PiApi) as PiApi;
+  let baseUrl = config.baseUrl || inkosProvider?.baseUrl || preset?.baseUrl || "";
   const extraHeaders = sanitizeHttpHeaders(config.headers ?? parseEnvHeaders());
+  // Prefer Google OpenAI-compatible endpoint when a proxy is configured (or the
+  // caller already pointed at /openai). Native google-generative-ai goes through
+  // pi-ai's own fetch and ignores INKOS_LLM_PROXY_URL / undici ProxyAgent.
+  const googleOpenAICompat = inkosProvider?.id === "google" && (
+    Boolean(config.proxyUrl?.trim())
+    || baseUrl.includes("/openai")
+    || Boolean(process.env.INKOS_LLM_PROXY_URL?.trim())
+  );
+  const piApi = (googleOpenAICompat ? "openai-completions" : piApiRaw) as PiApi;
+  if (googleOpenAICompat && !baseUrl.includes("/openai")) {
+    baseUrl = inkosProvider?.modelsBaseUrl
+      || "https://generativelanguage.googleapis.com/v1beta/openai";
+  }
   const compat = piApi === "openai-completions"
     ? resolveProviderCompat(inkosProvider, baseUrl)
     : undefined;
@@ -174,7 +229,7 @@ export function createLLMClient(config: LLMConfig): LLMClient {
   // pi-ai provider 字段：大多数情况 pi-ai 会按 baseUrl 自动嗅探（openrouter.ai / api.z.ai /
   // api.x.ai / deepseek.com / anthropic.com 等）。这里只列 pi-ai 嗅探不到、需要显式指定的少数情况。
   let piProvider: string;
-  if (inkosProvider?.id === "google") piProvider = "google";
+  if (inkosProvider?.id === "google") piProvider = googleOpenAICompat ? "openai" : "google";
   else if (inkosProvider?.id === "zhipu") piProvider = "zai";
   else if (inkosProvider?.id === "openrouter") piProvider = "openrouter";
   else if (inkosProvider?.id === "githubCopilot") piProvider = "githubCopilot";
@@ -221,6 +276,14 @@ function resolvePiApi(
 ): PiApi {
   if (serviceName === "custom") {
     return apiFormat === "responses" ? "openai-responses" : "openai-completions";
+  }
+  // OpenRouter supports both; InkOS writing / free Nemotron traffic uses chat
+  // completions (same as huobao-drama), not the Responses API.
+  if (serviceName === "openrouter" && apiFormat === "chat") {
+    return "openai-completions";
+  }
+  if (apiFormat === "responses") {
+    return "openai-responses";
   }
   return (presetApi ?? "openai-completions") as PiApi;
 }
@@ -450,13 +513,17 @@ function wrapLLMError(error: unknown, context?: { readonly baseUrl?: string; rea
         if (b.message) detail = b.type ? `${b.type}: ${b.message}` : b.message;
         else if (b.reason) detail = b.reason;
       }
+      if (!detail && typeof err.message === "string") {
+        detail = extractUpstreamDetailFromErrorMessage(err.message);
+      }
     }
     return new Error(
       `API 返回 400（请求参数错误）。${detail ? `上游详情：${detail}。\n` : ""}` +
       `常见原因：\n` +
       `  1. temperature / max_tokens 超出模型约束（如 Moonshot kimi-k2.X 强制 temperature=1）\n` +
       `  2. 模型名称不正确或未上架\n` +
-      `  3. 消息格式不兼容（部分服务不支持 system role 或 developer role）${ctxLine}`,
+      `  3. 消息格式不兼容（部分服务不支持 system role 或 developer role）\n` +
+      `  4. 本地 Ollama 上下文过小（常见默认 4096；建书/写章 prompt 更大时需提高 num_ctx）${ctxLine}`,
     );
   }
   if (msg.includes("403")) {
@@ -553,6 +620,30 @@ function isTransientLLMTransportError(error: unknown): boolean {
 }
 
 /**
+ * True when the failure is specifically a rate-limit / concurrency throttle
+ * (HTTP 429 or common phrasing). Used for longer minute-scale backoff so free-tier
+ * Zhipu (and similar) calls can wait out the window instead of failing immediately.
+ */
+export function isRateLimitLLMError(error: unknown): boolean {
+  const text = collectErrorText(error).toLowerCase();
+  if (/\b429\b/.test(text)) return true;
+  if (text.includes("too many requests") || text.includes("rate limit")) return true;
+  // Common zh phrasing from Chinese providers / wrapped InkOS errors
+  if (text.includes("请求过多") || text.includes("限流")) return true;
+  // Zhipu business codes (docs: 1302 account rate limit, 1305 platform overload).
+  // Some responses expose the code without an HTTP "429" substring.
+  if (/\b1302\b/.test(text) || /\b1305\b/.test(text)) return true;
+  return false;
+}
+
+/** Zhipu 1210 when max_tokens exceeds the model cap — worth rotating to another Flash. */
+export function isZhipuMaxTokensParamError(error: unknown): boolean {
+  const text = collectErrorText(error).toLowerCase();
+  return text.includes("max_tokens参数非法")
+    || (text.includes("1210") && text.includes("max_tokens"));
+}
+
+/**
  * Transient *HTTP-level* upstream failures worth retrying: 429 (rate limit),
  * 502/503/504 (gateway / temporarily unavailable / overloaded). These are the
  * aggregator blips that previously aborted whole architect/writer/short runs
@@ -568,6 +659,7 @@ export function isTransientLLMHttpError(error: unknown): boolean {
     return false;
   }
   const statusHit = /\b(429|502|503|504)\b/.test(text);
+  const zhipuRateHit = /\b1302\b/.test(text) || /\b1305\b/.test(text);
   const phraseHit = [
     "temporarily unavailable",
     "service unavailable",
@@ -578,8 +670,10 @@ export function isTransientLLMHttpError(error: unknown): boolean {
     "overloaded",
     "please retry",
     "try again later",
+    "请求过多",
+    "限流",
   ].some((needle) => text.includes(needle));
-  return statusHit || phraseHit;
+  return statusHit || zhipuRateHit || phraseHit;
 }
 
 function isRetryableLLMError(error: unknown): boolean {
@@ -592,26 +686,65 @@ function isRetryableLLMError(error: unknown): boolean {
 
 async function withTransientLLMRetry<T>(
   run: () => Promise<T>,
-  options?: { readonly enabled?: boolean; readonly signal?: AbortSignal },
+  options?: {
+    readonly enabled?: boolean;
+    readonly signal?: AbortSignal;
+    /**
+     * When true (streaming text/thinking deltas already wired to UI), only retry
+     * clear rate-limit errors. Those fail before any chunk is emitted; retrying
+     * mid-stream PartialResponse/502 would duplicate visible deltas.
+     */
+    readonly rateLimitOnly?: boolean;
+    /** Length of Zhipu (or other) model rotation pool; enables short hop delays. */
+    readonly modelRotationLength?: number;
+    /**
+     * Called before the rate-limit sleep. Return true when the caller switched
+     * to a different model so we can use a short hop delay.
+     */
+    readonly onRateLimitRetry?: (attempt: number) => boolean | void | Promise<boolean | void>;
+  },
 ): Promise<T> {
   const enabled = options?.enabled ?? true;
+  const rotationLength = Math.max(1, options?.modelRotationLength ?? 1);
   let lastError: unknown;
-  for (let attempt = 0; attempt <= TRANSIENT_LLM_RETRIES; attempt++) {
+  let longBackoffIndex = 0;
+  for (let attempt = 0; ; attempt++) {
     options?.signal?.throwIfAborted();
     try {
       return await run();
     } catch (error) {
       lastError = error;
-      if (
-        !enabled
-        || attempt >= TRANSIENT_LLM_RETRIES
-        || !isRetryableLLMError(error)
-      ) {
+      const rateLimited = isRateLimitLLMError(error);
+      const maxTokensParamError = isZhipuMaxTokensParamError(error);
+      const maxRetries = (rateLimited || maxTokensParamError)
+        ? RATE_LIMIT_LLM_RETRIES
+        : TRANSIENT_LLM_RETRIES;
+      const retryable = options?.rateLimitOnly
+        ? (rateLimited || maxTokensParamError)
+        : (isRetryableLLMError(error) || maxTokensParamError);
+      if (!enabled || attempt >= maxRetries || !retryable) {
         throw error;
       }
-      // Back off before retrying — immediate re-fire on a 429/503 just makes it
-      // worse. Linear is enough for a 2-retry budget (~0.8s, ~1.6s).
-      await abortableDelay(800 * (attempt + 1), options?.signal);
+      if (rateLimited || maxTokensParamError) {
+        const switched = Boolean(await options?.onRateLimitRetry?.(attempt));
+        // Hop quickly across free Flash models; after a full cycle use minute backoff.
+        const completedCycle = rotationLength > 1 && (attempt + 1) % rotationLength === 0;
+        const delayMs = maxTokensParamError
+          ? 500 // bad max_tokens — switch model immediately
+          : switched && !completedCycle
+            ? RATE_LIMIT_MODEL_ROTATE_DELAY_MS
+            : RATE_LIMIT_BACKOFF_MS[
+              Math.min(longBackoffIndex++, RATE_LIMIT_BACKOFF_MS.length - 1)
+            ]!;
+        console.warn(
+          `[llm] ${maxTokensParamError ? "max_tokens rejected" : "429 rate limit"} — waiting ${Math.round(delayMs / 1000)}s before retry ${attempt + 1}/${maxRetries}`
+          + (switched ? " (model rotated)" : ""),
+        );
+        await abortableDelay(delayMs, options?.signal);
+      } else {
+        // Short linear backoff for 502/503/transport blips (~0.8s, ~1.6s).
+        await abortableDelay(800 * (attempt + 1), options?.signal);
+      }
     }
   }
   throw lastError;
@@ -643,6 +776,31 @@ function shouldUseNativeCustomTransport(client: LLMClient): boolean {
   if (client.service === "kkaiapi" && client.provider === "openai") {
     return true;
   }
+  // 智谱 GLM-4.7+ 默认开启 thinking；需走原生 OpenAI 兼容传输才能注入
+  // thinking: { type: "disabled" }，否则长文写作会把 max_tokens 耗尽在思考上、正文为空。
+  if (client.service === "zhipu" && client.provider === "openai") {
+    return true;
+  }
+  // DeepSeek V4 defaults to thinking-on; same native path to inject thinking.disabled.
+  if (client.service === "deepseek" && client.provider === "openai") {
+    return true;
+  }
+  // Google via /openai + proxy: same native path so INKOS_LLM_PROXY_URL is honored.
+  if (
+    client.service === "google"
+    && client.provider === "openai"
+    && client._piModel?.api === "openai-completions"
+  ) {
+    return true;
+  }
+  // OpenRouter chat completions + proxy (Nemotron free, etc.).
+  if (
+    client.service === "openrouter"
+    && client.provider === "openai"
+    && client._piModel?.api === "openai-completions"
+  ) {
+    return true;
+  }
   if (client.service === "custom") {
     if (
       client.configSource === "studio"
@@ -658,11 +816,26 @@ function shouldUseNativeCustomTransport(client: LLMClient): boolean {
 }
 
 function shouldUseNativeLocalOpenAICompatibleTransport(client: LLMClient): boolean {
-  return !client._apiKey
+  // Studio/CLI often store a dummy key like "ollama" for local endpoints.
+  // That must not force the pi-ai Ollama path — OpenAI-compatible /v1 works better
+  // for dynamic local model ids such as deepseek-r1:14b.
+  return isAbsentOrLocalPlaceholderApiKey(client._apiKey)
     && isApiKeyOptionalForEndpoint({
       provider: client.provider,
       baseUrl: client._piModel?.baseUrl,
     });
+}
+
+/** Treat common local dummy keys as "no real API key". */
+export function isAbsentOrLocalPlaceholderApiKey(apiKey: string | undefined): boolean {
+  const normalized = (apiKey ?? "").trim().toLowerCase();
+  return normalized.length === 0
+    || normalized === "ollama"
+    || normalized === "local"
+    || normalized === "none"
+    || normalized === "n/a"
+    || normalized === "sk-local"
+    || normalized === "no-key";
 }
 
 function buildCustomHeaders(client: LLMClient): Record<string, string> {
@@ -670,21 +843,45 @@ function buildCustomHeaders(client: LLMClient): Record<string, string> {
   return sanitizeHttpHeaders({
     "Content-Type": "application/json",
     ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+    // OpenRouter asks for these attribution headers on free/paid traffic.
+    ...(client.service === "openrouter"
+      ? {
+          "HTTP-Referer": "https://github.com/inkos-ai/inkos",
+          "X-Title": "InkOS",
+        }
+      : {}),
     ...(client._piModel?.headers ?? {}),
   }) ?? { "Content-Type": "application/json" };
 }
 
 function defaultOpenAIChatExtra(client: LLMClient, model: string): Record<string, unknown> {
-  if (client.service !== "minimax") return {};
-  // MiniMax OpenAI 兼容端点（issue #329）：
-  // - reasoning_split: true 让 thinking 拆分到 reasoning_content / reasoning_details，
-  //   不再以 <think>...</think> 内联在 content 里。M2.x 系列的 thinking 无法关闭，
-  //   不拆分的话思考内容会混进章节/对话正文。
-  // - M3 系列额外默认关闭 thinking（M2.x 不支持 thinking 参数，不能发送）。
-  return {
-    reasoning_split: true,
-    ...(/^minimax-m3(?:$|[-_.])/i.test(model) ? { thinking: { type: "disabled" } } : {}),
-  };
+  if (client.service === "minimax") {
+    // MiniMax OpenAI 兼容端点（issue #329）：
+    // - reasoning_split: true 让 thinking 拆分到 reasoning_content / reasoning_details，
+    //   不再以 <think>...</think> 内联在 content 里。M2.x 系列的 thinking 无法关闭，
+    //   不拆分的话思考内容会混进章节/对话正文。
+    // - M3 系列额外默认关闭 thinking（M2.x 不支持 thinking 参数，不能发送）。
+    return {
+      reasoning_split: true,
+      ...(/^minimax-m3(?:$|[-_.])/i.test(model) ? { thinking: { type: "disabled" } } : {}),
+    };
+  }
+  if (client.service === "zhipu") {
+    // GLM-4.7+ defaults to thinking-on; leave it enabled only burns max_tokens on
+    // reasoning and can yield empty chapter bodies. Older Flash models also accept
+    // the field, so always send disabled for InkOS writing/settlement traffic.
+    return { thinking: { type: "disabled" } };
+  }
+  if (client.service === "deepseek") {
+    // deepseek-v4-* defaults to thinking mode; disable for drafting throughput.
+    return { thinking: { type: "disabled" } };
+  }
+  if (client.service === "google") {
+    // Gemini 3.x defaults to medium thinking; keep it minimal for novel drafting
+    // so output tokens aren't burned on hidden thoughts.
+    return { reasoning_effort: "minimal" };
+  }
+  return {};
 }
 
 function sanitizeHeaderApiKey(apiKey: string | undefined): string {
@@ -821,7 +1018,10 @@ function extractOpenAITextPart(value: any): string {
 
 function extractChatContent(json: any): string {
   const message = json?.choices?.[0]?.message;
-  return extractOpenAITextPart(message?.content) || extractOpenAITextPart(message?.reasoning_content);
+  // Ollama deepseek-r1 等思考模型用 `reasoning`；OpenAI 兼容网关多用 `reasoning_content`。
+  return extractOpenAITextPart(message?.content)
+    || extractOpenAITextPart(message?.reasoning_content)
+    || extractOpenAITextPart(message?.reasoning);
 }
 
 function extractChatDeltaContent(json: any): string {
@@ -832,8 +1032,166 @@ function extractChatDeltaReasoningContent(json: any): string {
   const delta = json?.choices?.[0]?.delta;
   // MiniMax reasoning_split 模式下流式 thinking 走 delta.reasoning_details
   //（[{ text: "..." }] 数组）；其它服务走 delta.reasoning_content。
+  // Ollama R1 流式思考字段为 delta.reasoning。
   return extractOpenAITextPart(delta?.reasoning_content)
-    || extractOpenAITextPart(delta?.reasoning_details);
+    || extractOpenAITextPart(delta?.reasoning_details)
+    || extractOpenAITextPart(delta?.reasoning);
+}
+
+function extractUpstreamDetailFromErrorMessage(message: string): string {
+  // readErrorResponse 产出形如：`400 {"error":{"message":"..."}}` 或嵌套 JSON 字符串。
+  const jsonStart = message.indexOf("{");
+  if (jsonStart < 0) return "";
+  try {
+    const parsed = JSON.parse(message.slice(jsonStart)) as {
+      error?: { message?: string; type?: string } | string;
+      message?: string;
+    };
+    const raw = typeof parsed.error === "string"
+      ? parsed.error
+      : parsed.error?.message ?? parsed.message ?? "";
+    if (!raw) return "";
+    // Ollama 有时把内层 error 再 JSON.stringify 一次
+    if (raw.trim().startsWith("{")) {
+      try {
+        const nested = JSON.parse(raw) as { error?: { message?: string }; message?: string };
+        return nested.error?.message ?? nested.message ?? raw;
+      } catch {
+        return raw;
+      }
+    }
+    return raw;
+  } catch {
+    return "";
+  }
+}
+
+function resolveCallMaxTokens(
+  client: LLMClient,
+  model: string,
+  explicit?: number,
+): number {
+  const card = lookupModel(client.service ?? "custom", model);
+  const cardMax = card?.maxOutput ?? client.defaults.maxTokens;
+  if (explicit === undefined) return cardMax;
+  // Never send above the provider card — Zhipu returns HTTP 400 (code 1210)
+  // when max_tokens exceeds the model-specific cap (e.g. glm-4-flash-250414 ≤ 16384).
+  return Math.min(explicit, cardMax);
+}
+
+function resolveOllamaNumCtx(client: LLMClient, model: string): number {
+  const fromEnv = Number.parseInt(process.env.OLLAMA_NUM_CTX ?? "", 10);
+  if (Number.isFinite(fromEnv) && fromEnv > 0) return fromEnv;
+  const card = lookupModel(client.service ?? "custom", model);
+  const fromCard = card?.contextWindowTokens;
+  if (typeof fromCard === "number" && fromCard > 0) {
+    return Math.min(fromCard, OLLAMA_DEFAULT_NUM_CTX);
+  }
+  return OLLAMA_DEFAULT_NUM_CTX;
+}
+
+function ollamaNativeBaseUrl(openaiCompatBaseUrl: string): string {
+  // http://localhost:11434/v1 → http://localhost:11434
+  return openaiCompatBaseUrl.replace(/\/v1\/?$/, "").replace(/\/$/, "");
+}
+
+/**
+ * OpenAI 兼容 /v1 不会应用 options.num_ctx；Ollama 默认常以 4096 驻留。
+ * 建书 prompt 往往 >4k，需先经原生 API 把 num_ctx 抬上去。
+ * 已加载实例若 context 过小，必须先 unload 再以目标 num_ctx 加载，
+ * 否则 /api/chat 可能 200 但实际仍沿用旧的 4096。
+ */
+async function ensureOllamaNumCtx(
+  client: LLMClient,
+  model: string,
+  numCtx: number,
+  signal?: AbortSignal,
+): Promise<void> {
+  const openaiBase = client._piModel?.baseUrl ?? "";
+  if (!openaiBase) return;
+  const nativeBase = ollamaNativeBaseUrl(openaiBase);
+
+  let needsReload = true;
+  try {
+    const psRes = await fetchWithProxy(`${nativeBase}/api/ps`, {
+      method: "GET",
+      signal,
+    }, client.proxyUrl);
+    if (psRes.ok) {
+      const ps = await psRes.json() as {
+        models?: Array<{ name?: string; model?: string; context_length?: number }>;
+      };
+      const loaded = ps.models?.find((m) => m.name === model || m.model === model);
+      if (loaded && (loaded.context_length ?? 0) >= numCtx) {
+        needsReload = false;
+      } else if (loaded) {
+        await fetchWithProxy(`${nativeBase}/api/generate`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ model, prompt: "", keep_alive: 0 }),
+          signal,
+        }, client.proxyUrl);
+      }
+    }
+  } catch {
+    // probe/unload failed — still attempt preload below
+  }
+
+  if (!needsReload) return;
+
+  const preload = await fetchWithProxy(`${nativeBase}/api/chat`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model,
+      messages: [{ role: "user", content: "." }],
+      stream: false,
+      keep_alive: "30m",
+      options: { num_ctx: numCtx },
+    }),
+    signal,
+  }, client.proxyUrl);
+  if (!preload.ok) {
+    const detail = await readErrorResponse(preload);
+    throw wrapLLMError(new Error(detail), {
+      baseUrl: openaiBase,
+      model,
+      service: client.service,
+    });
+  }
+
+  // Confirm context actually stuck; surface a clear error if Ollama ignored num_ctx.
+  try {
+    const psRes = await fetchWithProxy(`${nativeBase}/api/ps`, {
+      method: "GET",
+      signal,
+    }, client.proxyUrl);
+    if (psRes.ok) {
+      const ps = await psRes.json() as {
+        models?: Array<{ name?: string; model?: string; context_length?: number }>;
+      };
+      const loaded = ps.models?.find((m) => m.name === model || m.model === model);
+      const actual = loaded?.context_length ?? 0;
+      if (actual > 0 && actual < numCtx) {
+        throw wrapLLMError(
+          new Error(
+            `400 Ollama loaded "${model}" with context_length=${actual}, ` +
+            `but InkOS needs >= ${numCtx}. Set OLLAMA_NUM_CTX or free VRAM and retry.`,
+          ),
+          { baseUrl: openaiBase, model, service: client.service },
+        );
+      }
+    }
+  } catch (error) {
+    if (error instanceof Error && error.message.includes("API 返回 400")) throw error;
+    // ignore probe failures after successful preload
+  }
+}
+
+function isOllamaCompatibleClient(client: LLMClient): boolean {
+  if (client.service === "ollama") return true;
+  const base = (client._piModel?.baseUrl ?? "").toLowerCase();
+  return base.includes(":11434") || base.includes("localhost:11434") || base.includes("127.0.0.1:11434");
 }
 
 function extractResponsesContent(json: any): string {
@@ -976,6 +1334,7 @@ async function chatCompletionViaCustomOpenAICompatible(
   onTextDelta?: (text: string) => void,
   signal?: AbortSignal,
   allowSystemRoleFallback = true,
+  onThinkingDelta?: OnThinkingDelta,
 ): Promise<LLMResponse> {
   if (client.provider === "anthropic") {
     return chatCompletionViaCustomAnthropicCompatible(client, model, messages, resolved, onStreamProgress, onTextDelta, signal);
@@ -1093,6 +1452,10 @@ async function chatCompletionViaCustomOpenAICompatible(
     payload.stream_options = { include_usage: true };
   }
 
+  if (isOllamaCompatibleClient(client)) {
+    await ensureOllamaNumCtx(client, model, resolveOllamaNumCtx(client, model), signal);
+  }
+
   const response = await fetchWithProxy(`${baseUrl.replace(/\/$/, "")}/chat/completions`, {
     method: "POST",
     headers,
@@ -1111,6 +1474,7 @@ async function chatCompletionViaCustomOpenAICompatible(
         onTextDelta,
         signal,
         false,
+        onThinkingDelta,
       );
     }
     throw wrapLLMError(new Error(detail), errorCtx);
@@ -1120,7 +1484,13 @@ async function chatCompletionViaCustomOpenAICompatible(
     const json = await response.json() as any;
     // MiniMax M2.x 等模型可能把思考内容以 <think>...</think> 内联在 content 开头，
     // 剥掉起始处的完整 think 块，防止思考内容混进章节/对话正文（issue #329）。
-    const content = stripLeadingThinkBlock(extractChatContent(json));
+    const rawContent = extractChatContent(json);
+    const thinkMatch = /^\s*<think>([\s\S]*?)<\/think>/i.exec(rawContent);
+    if (thinkMatch?.[1]?.trim()) onThinkingDelta?.(thinkMatch[1].trim());
+    const reasoningOnly = extractOpenAITextPart(json?.choices?.[0]?.message?.reasoning_content)
+      || extractOpenAITextPart(json?.choices?.[0]?.message?.reasoning);
+    if (reasoningOnly) onThinkingDelta?.(reasoningOnly);
+    const content = stripLeadingThinkBlock(rawContent);
     if (!content) {
       throw wrapLLMError(new Error("LLM returned empty response"), errorCtx);
     }
@@ -1147,7 +1517,13 @@ async function chatCompletionViaCustomOpenAICompatible(
   const monitor = createStreamMonitor(onStreamProgress);
   // 内联 <think>...</think> 的模型（如 MiniMax M2.x）：剥掉响应起始处的完整
   // think 块，思考内容既不并入正文也不通过 onTextDelta 发给 UI（issue #329）。
-  const thinkStripper = createLeadingThinkTagStripper();
+  const thinkStripper = createLeadingThinkTagStripper({
+    onThinking: (text) => {
+      reasoningContent += (reasoningContent ? "\n" : "") + text;
+      monitor.onChunk(text, "thinking");
+      onThinkingDelta?.(text);
+    },
+  });
 
   try {
     while (true) {
@@ -1168,9 +1544,9 @@ async function chatCompletionViaCustomOpenAICompatible(
         }
         const delta = extractChatDeltaContent(json);
         if (delta) {
-          monitor.onChunk(delta);
           const emittable = thinkStripper.push(delta);
           if (emittable) {
+            monitor.onChunk(emittable, "text");
             content += emittable;
             onTextDelta?.(emittable);
           }
@@ -1178,7 +1554,8 @@ async function chatCompletionViaCustomOpenAICompatible(
           const reasoningDelta = extractChatDeltaReasoningContent(json);
           if (reasoningDelta) {
             reasoningContent += reasoningDelta;
-            monitor.onChunk(reasoningDelta);
+            monitor.onChunk(reasoningDelta, "thinking");
+            onThinkingDelta?.(reasoningDelta);
           }
         }
         if (json?.usage) {
@@ -1218,6 +1595,7 @@ export async function chatCompletion(
     readonly webSearch?: boolean;
     readonly onStreamProgress?: OnStreamProgress;
     readonly onTextDelta?: (text: string) => void;
+    readonly onThinkingDelta?: OnThinkingDelta;
     readonly signal?: AbortSignal;
     // Diagnostics / connectivity checks want a fast pass-or-fail — set false to
     // skip the transient 502/503/429 retry+backoff (e.g. the doctor probe).
@@ -1225,44 +1603,77 @@ export async function chatCompletion(
   },
 ): Promise<LLMResponse> {
   if (isLlmStubEnabled()) return Promise.resolve(stubChatCompletion(messages, model));
-  // C1 (v2.0.0)：删除 maxTokensCap 机制。per-call 显式传的 maxTokens 永远不被裁剪。
-  const resolved = {
-    temperature: clampTemperatureForModel(
-      client.service,
-      model,
-      options?.temperature ?? client.defaults.temperature,
-    ),
-    maxTokens: options?.maxTokens ?? client.defaults.maxTokens,
-    extra: client.defaults.extra,
-  };
   const onStreamProgress = options?.onStreamProgress;
   const onTextDelta = options?.onTextDelta;
+  const onThinkingDelta = options?.onThinkingDelta;
   const signal = options?.signal;
-  const errorCtx = { baseUrl: client._piModel?.baseUrl ?? "(unknown)", model, service: client.service };
+  const rotation = client.service === "zhipu"
+    ? buildZhipuRateLimitModelRotation(model)
+    : [model];
+  let activeModel = model;
+  let rotationIndex = 0;
+  const errorCtx = {
+    baseUrl: client._piModel?.baseUrl ?? "(unknown)",
+    model: activeModel,
+    service: client.service,
+  };
 
   try {
+    const hasStreamDeltas = Boolean(onTextDelta || onThinkingDelta);
     return await withTransientLLMRetry(
       async () => {
         signal?.throwIfAborted();
+        const callModel = activeModel;
+        errorCtx.model = callModel;
+        const resolved = {
+          temperature: clampTemperatureForModel(
+            client.service,
+            callModel,
+            options?.temperature ?? client.defaults.temperature,
+          ),
+          maxTokens: resolveCallMaxTokens(client, callModel, options?.maxTokens),
+          extra: client.defaults.extra,
+        };
         assertWithinContextWindow({
-          piModel: resolvePiModel(client, model),
-          model,
+          piModel: resolvePiModel(client, callModel),
+          model: callModel,
           estimatedInputTokens: estimateLLMMessagesTokens(messages),
           reservedOutputTokens: resolved.maxTokens,
         });
         if (shouldUseNativeCustomTransport(client)) {
-          return chatCompletionViaCustomOpenAICompatible(client, model, messages, resolved, onStreamProgress, onTextDelta, signal);
+          return chatCompletionViaCustomOpenAICompatible(
+            client, callModel, messages, resolved, onStreamProgress, onTextDelta, signal, true, onThinkingDelta,
+          );
         }
-        return chatCompletionViaPiAi(client, model, messages, resolved, onStreamProgress, onTextDelta, signal);
+        return chatCompletionViaPiAi(
+          client, callModel, messages, resolved, onStreamProgress, onTextDelta, signal, onThinkingDelta,
+        );
       },
-      // Retrying after UI text deltas have been emitted can duplicate visible
-      // text; callers can also opt out (e.g. fast-fail diagnostics).
-      { enabled: (options?.retry ?? true) && !onTextDelta, signal },
+      // With stream deltas: only 429/rate-limit (fails before chunks). Callers can
+      // opt out entirely (e.g. fast-fail diagnostics via retry: false).
+      {
+        enabled: options?.retry ?? true,
+        rateLimitOnly: hasStreamDeltas,
+        signal,
+        modelRotationLength: rotation.length,
+        onRateLimitRetry: () => {
+          if (rotation.length <= 1) return false;
+          const prev = activeModel;
+          rotationIndex = (rotationIndex + 1) % rotation.length;
+          activeModel = rotation[rotationIndex]!;
+          if (activeModel === prev) return false;
+          console.warn(`[llm] 429 on ${prev} — rotating to ${activeModel}`);
+          return true;
+        },
+      },
     );
   } catch (error) {
     // 注意：中断的流（PartialResponseError）不再"打捞"半截内容当成功返回——
     // 那会产出写到一半就结束的章节/设定文件。重试由 withTransientLLMRetry
     // 负责（完整重新生成）；重试耗尽后如实抛错。
+    if (error instanceof Error && error.message.startsWith("API 返回 ")) {
+      throw error;
+    }
     throw wrapLLMError(error, errorCtx);
   }
 }
@@ -1277,8 +1688,15 @@ export async function chatCompletion(
  */
 function resolvePiModel(client: LLMClient, model: string): PiModel<PiApi> {
   const base = client._piModel!;
-  if (base.id === model) return base;
-  return { ...base, id: model, name: model };
+  if (base.id === model && base.name === model) return base;
+  const card = lookupModel(client.service ?? "custom", model);
+  return {
+    ...base,
+    id: model,
+    name: model,
+    ...(card?.contextWindowTokens ? { contextWindow: card.contextWindowTokens } : {}),
+    ...(card?.maxOutput ? { maxTokens: card.maxOutput } : {}),
+  };
 }
 
 /** Convert inkos LLMMessage[] to pi-ai Context. */
@@ -1314,6 +1732,7 @@ async function chatCompletionViaPiAi(
   onStreamProgress?: OnStreamProgress,
   onTextDelta?: (text: string) => void,
   signal?: AbortSignal,
+  onThinkingDelta?: OnThinkingDelta,
 ): Promise<LLMResponse> {
   const piModel = resolvePiModel(client, model);
   const context = toPiContext(messages);
@@ -1330,10 +1749,16 @@ async function chatCompletionViaPiAi(
     if (response.stopReason === "error" && response.errorMessage) {
       throw new Error(response.errorMessage);
     }
-    const content = response.content
+    const textContent = response.content
       .filter((block): block is { type: "text"; text: string } => block.type === "text")
       .map((block) => block.text)
       .join("");
+    const thinkingContent = response.content
+      .filter((block): block is { type: "thinking"; thinking: string } => block.type === "thinking")
+      .map((block) => block.thinking)
+      .join("");
+    if (thinkingContent) onThinkingDelta?.(thinkingContent);
+    const content = textContent || thinkingContent;
     if (!content) {
       const diag = `usage=${response.usage.input}+${response.usage.output}`;
       console.warn(`[inkos] LLM 非流式响应无文本内容 (${diag})`);
@@ -1351,6 +1776,7 @@ async function chatCompletionViaPiAi(
 
   const eventStream = piStreamSimple(piModel, context, streamOpts);
   const chunks: string[] = [];
+  const thinkingChunks: string[] = [];
   const monitor = createStreamMonitor(onStreamProgress);
   let inputTokens = 0;
   let outputTokens = 0;
@@ -1360,8 +1786,18 @@ async function chatCompletionViaPiAi(
     for await (const event of eventStream) {
       if (event.type === "text_delta") {
         chunks.push(event.delta);
-        monitor.onChunk(event.delta);
+        monitor.onChunk(event.delta, "text");
         onTextDelta?.(event.delta);
+      }
+      if (event.type === "thinking_delta") {
+        const delta = typeof (event as { delta?: string }).delta === "string"
+          ? (event as { delta: string }).delta
+          : "";
+        if (delta) {
+          thinkingChunks.push(delta);
+          monitor.onChunk(delta, "thinking");
+          onThinkingDelta?.(delta);
+        }
       }
       if (event.type === "done" || event.type === "error") {
         const msg = event.type === "done" ? event.message : event.error;
@@ -1369,9 +1805,20 @@ async function chatCompletionViaPiAi(
         outputTokens = msg.usage.output;
         if (event.type === "done") {
           sawDone = true;
+          // Capture final thinking blocks when the stream never emitted text_delta.
+          if (chunks.length === 0 && Array.isArray(msg.content)) {
+            for (const block of msg.content) {
+              if (block.type === "thinking") {
+                const thinking = typeof (block as { thinking?: string }).thinking === "string"
+                  ? (block as { thinking: string }).thinking
+                  : "";
+                if (thinking) thinkingChunks.push(thinking);
+              }
+            }
+          }
         }
         if (event.type === "error" && msg.errorMessage) {
-          const partial = chunks.join("");
+          const partial = chunks.join("") || thinkingChunks.join("");
           if (partial) {
             throw new PartialResponseError(partial, new Error(msg.errorMessage));
           }
@@ -1382,7 +1829,7 @@ async function chatCompletionViaPiAi(
   } catch (streamError) {
     monitor.stop();
     if (streamError instanceof PartialResponseError) throw streamError;
-    const partial = chunks.join("");
+    const partial = chunks.join("") || thinkingChunks.join("");
     if (partial) {
       // 带着已收到的部分内容抛 PartialResponseError，让瞬时重试整体重新生成
       throw new PartialResponseError(partial, streamError);
@@ -1392,7 +1839,7 @@ async function chatCompletionViaPiAi(
     monitor.stop();
   }
 
-  const content = chunks.join("");
+  const content = chunks.join("") || thinkingChunks.join("");
   if (!content) {
     const diag = `usage=${inputTokens}+${outputTokens}`;
     console.warn(`[inkos] LLM 流式响应无文本内容 (${diag})`);

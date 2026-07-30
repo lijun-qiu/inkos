@@ -155,7 +155,7 @@ ${chapterContent}`;
   }
 
   private parseResult(content: string): ValidationResult {
-    const trimmed = content.trim();
+    const trimmed = stripThinkBlocks(content).trim();
     if (!trimmed) {
       throw new Error("LLM returned empty response");
     }
@@ -170,16 +170,31 @@ ${chapterContent}`;
       throw new Error("LLM returned empty response");
     }
 
-    const verdictLine = lines[0]!;
-    if (!/^(PASS|FAIL)$/i.test(verdictLine)) {
-      throw new Error("State validator returned invalid response");
+    // Local models often put reasoning before the verdict, or wrap it in markdown.
+    // Prefer an exact PASS/FAIL line anywhere; fall back to a line that starts with it.
+    const verdictIndex = lines.findIndex((line) => isVerdictToken(stripMarkdownNoise(line)));
+    if (verdictIndex < 0) {
+      // Soft-pass: invalid formatting must not freeze the book as state-degraded on local LLMs.
+      this.log?.warn(
+        `State validator returned unparseable verdict; treating as PASS with warning. Preview: ${trimmed.slice(0, 200)}`,
+      );
+      return {
+        passed: true,
+        warnings: [{
+          category: "parse",
+          description: "State validator output was not PASS/FAIL or JSON; skipped hard fail to avoid blocking write-next.",
+        }],
+      };
     }
-    const passed = /^PASS$/i.test(verdictLine);
+
+    const verdictLine = stripMarkdownNoise(lines[verdictIndex]!);
+    const passed = /^PASS\b/i.test(verdictLine);
 
     const warnings: ValidationWarning[] = [];
-    for (let i = 1; i < lines.length; i++) {
+    for (let i = 0; i < lines.length; i++) {
+      if (i === verdictIndex) continue;
       const line = lines[i]!;
-      if (/^(PASS|FAIL)$/i.test(line)) continue;
+      if (isVerdictToken(stripMarkdownNoise(line))) continue;
 
       const categoryMatch = line.match(/^\[([^\]]+)\]\s*(.+)$/);
       if (categoryMatch) {
@@ -234,6 +249,20 @@ ${chapterContent}`;
       return null;
     }
   }
+}
+
+function stripThinkBlocks(text: string): string {
+  return text
+    .replace(/<think\b[^>]*>[\s\S]*?<\/think>/gi, "")
+    .replace(/<\/?think\b[^>]*>/gi, "");
+}
+
+function stripMarkdownNoise(line: string): string {
+  return line.replace(/^[*`_~\s]+/, "").replace(/[*`_~\s]+$/, "").trim();
+}
+
+function isVerdictToken(line: string): boolean {
+  return /^(PASS|FAIL)(?:\b|[.!:：]|$)/i.test(line);
 }
 
 function extractBalancedJsonObject(text: string): string | null {

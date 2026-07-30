@@ -4,8 +4,10 @@ import { streamSSE } from "hono/streaming";
 import { serve } from "@hono/node-server";
 import { gzipSync } from "node:zlib";
 import { randomUUID } from "node:crypto";
+import { registerLocalModelRoutes } from "./local-models.js";
 import {
   StateManager,
+  BookWriteLockError,
   PipelineRunner,
   createLLMClient,
   createLogger,
@@ -979,7 +981,10 @@ function isWriteNextProductionRequest(args: {
   readonly actionSource: ActionSource;
   readonly requestedIntent?: RequestedIntent;
 }): boolean {
-  if (!args.agentBookId || args.sessionKind !== "book") return false;
+  // Users often keep typing in the original book-create session after the book
+  // exists. Require a concrete book id, but allow both book and book-create.
+  if (!args.agentBookId) return false;
+  if (args.sessionKind !== "book" && args.sessionKind !== "book-create") return false;
   if (args.requestedIntent === "write_next") return true;
   if (args.actionSource === "free-text") return isExplicitWriteChapterCommand(args.instruction);
   return isWriteNextInstruction(args.instruction);
@@ -1331,6 +1336,7 @@ interface CollectedToolExec {
   error?: string;
   stages?: Array<{ label: string; status: "pending" | "completed" }>;
   logs?: string[];
+  thinking?: string;
   startedAt: number;
   completedAt?: number;
 }
@@ -1449,7 +1455,7 @@ function buildWriteNextResponseText(
     ? [
         `已为 ${bookId} 写出第 ${writeResult.chapterNumber} 章`,
         writeResult.title ? `《${writeResult.title}》` : "",
-        `，字数 ${writeResult.wordCount}，但审稿未通过，状态 ${writeResult.status}，需要复核后再继续。`,
+        `，字数 ${writeResult.wordCount}，自动审改后仍未通过（${writeResult.status}）。可继续写下一章；也可在书籍页再点修订/通过。`,
       ].join("")
     : [
         `已为 ${bookId} 完成第 ${writeResult.chapterNumber} 章`,
@@ -1460,7 +1466,7 @@ function buildWriteNextResponseText(
     ? `chapter ${writeResult.chapterNumber} "${writeResult.title}"`
     : `chapter ${writeResult.chapterNumber}`;
   const enResponseText = writeNeedsReview
-    ? `Wrote ${enChapterRef} for ${bookId}: ${writeResult.wordCount} words, but the review did not pass (status: ${writeResult.status}). Manual review is required before continuing.`
+    ? `Wrote ${enChapterRef} for ${bookId}: ${writeResult.wordCount} words; still ${writeResult.status} after automatic repair. You can write the next chapter, or revise/approve on the book page.`
     : `Completed ${enChapterRef} for ${bookId}: ${writeResult.wordCount} words, status ${writeResult.status}.`;
   return pick(lang, zhResponseText, enResponseText);
 }
@@ -2702,6 +2708,8 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
   // 中止在这个窗口内从磁盘读不到快照，必须先经内存 sessionId → taskId →
   // controller 找到刚启动的任务。
   const reservedProductionSessions = new Map<string, string>();
+  // Pipeline LLM thinking text keyed by execution id (for task snapshot persistence).
+  const pipelineThinkingByExecutionId = new Map<string, string>();
   // 已删除会话的 sessionId：删除会话时中止其生产任务，任务随后的错误持久化
   // 不能把快照文件重新写回来（给已删除的会话"还魂"）。同名会话重新创建时移除标记。
   const deletedSessionIds = new Set<string>();
@@ -2736,6 +2744,9 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
         ...exec,
         ...(exec.stages ? { stages: exec.stages.map((stage) => ({ ...stage })) } : {}),
         ...(exec.logs ? { logs: [...exec.logs] } : {}),
+        ...((exec.thinking ?? pipelineThinkingByExecutionId.get(exec.id))
+          ? { thinking: exec.thinking ?? pipelineThinkingByExecutionId.get(exec.id) }
+          : {}),
       },
     };
     await saveStudioTaskSnapshot(root, snapshot);
@@ -2897,7 +2908,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
       projectRoot: root,
       defaultLLMConfig: currentConfig.llm,
       foundationReviewRetries: currentConfig.foundation?.reviewRetries ?? 2,
-      writingReviewRetries: currentConfig.writing?.reviewRetries ?? 1,
+      writingReviewRetries: currentConfig.writing?.reviewRetries ?? 5,
       chapterReviewMode,
       revisionGate,
       modelOverrides: currentConfig.modelOverrides,
@@ -2918,6 +2929,20 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
           elapsedMs: progress.elapsedMs,
           totalChars: progress.totalChars,
           chineseChars: progress.chineseChars,
+        });
+      },
+      onThinkingDelta: (text) => {
+        const executionId = overrides?.executionIdForSSE;
+        if (executionId && text) {
+          pipelineThinkingByExecutionId.set(
+            executionId,
+            (pipelineThinkingByExecutionId.get(executionId) ?? "") + text,
+          );
+        }
+        broadcast("llm:thinking", {
+          ...(overrides?.sessionIdForSSE ? { sessionId: overrides.sessionIdForSSE } : {}),
+          ...sseExecutionTag,
+          text,
         });
       },
       externalContext: overrides?.externalContext,
@@ -3436,12 +3461,37 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
     const secrets = await loadSecrets(root);
     const endpoints = getAllEndpoints().filter((ep) => ep.id !== "custom");
 
-    // Fast: only check connection status from secrets, no external API calls.
+    // Project-configured services can be "connected" without a real API key when
+    // the endpoint is local/self-hosted (Ollama etc.). Chat model pickers only
+    // list connected services, so empty local keys must not hide them.
+    const configuredServiceKeys = new Set<string>();
+    try {
+      const config = await loadRawConfig(root);
+      const llm = (config.llm as Record<string, unknown> | undefined) ?? {};
+      for (const svc of normalizeServiceConfig(llm.services)) {
+        configuredServiceKeys.add(svc.service === "custom" ? `custom:${svc.name ?? "Custom"}` : svc.service);
+      }
+      if (typeof llm.service === "string" && llm.service.trim()) {
+        configuredServiceKeys.add(llm.service.trim());
+      }
+    } catch { /* no config file yet */ }
+
+    const isServiceConnected = (serviceId: string, baseUrl: string | undefined): boolean => {
+      const hasKey = Boolean(secrets.services[serviceId]?.apiKey?.trim());
+      if (hasKey) return true;
+      if (!configuredServiceKeys.has(serviceId)) return false;
+      return isApiKeyOptionalForEndpoint({
+        provider: "openai",
+        baseUrl,
+      });
+    };
+
+    // Fast: connection status from secrets + local optional-key config, no external API calls.
     const services = endpoints.map((ep) => ({
       service: ep.id,
       label: ep.label,
       group: ep.group,
-      connected: Boolean(secrets.services[ep.id]?.apiKey),
+      connected: isServiceConnected(ep.id, ep.baseUrl),
     })).sort(compareServiceListItems);
 
     // Add custom services from inkos.json
@@ -3454,7 +3504,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
             service: secretKey,
             label: svc.name ?? "Custom",
             group: undefined,
-            connected: Boolean(secrets.services[secretKey]?.apiKey),
+            connected: isServiceConnected(secretKey, svc.baseUrl),
           });
         }
       }
@@ -4574,10 +4624,16 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
         );
       }
       const agentBookId = requestedActiveBookId ?? persistedBookId;
-      const sessionKind = normalizeStudioSessionKind(
+      const requestedSessionKind = normalizeStudioSessionKind(
         reqSessionKind,
         bookSession.sessionKind ?? (agentBookId ? "book" : "chat"),
       );
+      // Once a create session is bound to a book, don't let the client demote it
+      // back to book-create (stale React state). That would skip write-next production routing.
+      const sessionKind: SessionKind =
+        persistedBookId && bookSession.sessionKind === "book" && requestedSessionKind === "book-create"
+          ? "book"
+          : requestedSessionKind;
       if (bookSession.sessionKind !== sessionKind || (playMode && bookSession.playMode !== playMode)) {
         const updatedSession = await createAndPersistBookSession(
           root,
@@ -4934,6 +4990,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
         } finally {
           activeConfirmedTasks.delete(taskId);
           reservedProductionSessions.delete(reservedSessionId);
+          pipelineThinkingByExecutionId.delete(taskId);
         }
       }
 
@@ -5254,27 +5311,16 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
   app.post("/api/v1/books/:id/audit/:chapter", async (c) => {
     const id = c.req.param("id");
     const chapterNum = parseInt(c.req.param("chapter"), 10);
-    const bookDir = state.bookDir(id);
 
     broadcast("audit:start", { bookId: id, chapter: chapterNum });
     try {
-      const book = await state.loadBookConfig(id);
-      const chaptersDir = join(bookDir, "chapters");
-      const files = await readdir(chaptersDir);
-      const paddedNum = String(chapterNum).padStart(4, "0");
-      const match = files.find((f) => f.startsWith(paddedNum) && f.endsWith(".md"));
-      if (!match) return c.json({ error: "Chapter not found" }, 404);
-
-      const content = await readFile(join(chaptersDir, match), "utf-8");
-      const currentConfig = await loadCurrentProjectConfig();
-      const { ContinuityAuditor } = await import("@actalk/inkos-core");
-      const auditor = new ContinuityAuditor({
-        client: createLLMClient(currentConfig.llm),
-        model: currentConfig.llm.model,
-        projectRoot: root,
-        bookId: id,
-      });
-      const result = await auditor.auditChapter(bookDir, content, chapterNum, book.genre);
+      // Use pipeline.auditDraft so chapter index status/issues are persisted
+      // (ready-for-review vs audit-failed). A raw ContinuityAuditor call only
+      // returned JSON and left the UI stuck on the old status.
+      const pipeline = new PipelineRunner(await buildPipelineConfig({
+        bookIdForSettings: id,
+      }));
+      const result = await pipeline.auditDraft(id, chapterNum);
       broadcast("audit:complete", { bookId: id, chapter: chapterNum, passed: result.passed });
       return c.json(result);
     } catch (e) {
@@ -5683,9 +5729,27 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
       .catch(() => ({}));
 
     broadcast("rewrite:start", { bookId: id, chapter: chapterNum });
+    // Hold the book lock across rollback so a concurrent revise/write cannot
+    // race with destructive chapter deletion. Release before writeNextChapter,
+    // which acquires its own lock.
+    let releaseLock: (() => Promise<void>) | undefined;
+    try {
+      releaseLock = await state.acquireBookLock(id);
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      broadcast("rewrite:error", { bookId: id, error: message });
+      if (e instanceof BookWriteLockError) {
+        return c.json({ error: message, code: e.code }, 409);
+      }
+      return c.json({ error: message }, 500);
+    }
+
     try {
       const rollbackTarget = chapterNum - 1;
       const discarded = await state.rollbackToChapter(id, rollbackTarget);
+      await releaseLock();
+      releaseLock = undefined;
+
       const pipeline = new PipelineRunner(await buildPipelineConfig({
         externalContext: body.brief,
       }));
@@ -5697,6 +5761,10 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
     } catch (e) {
       broadcast("rewrite:error", { bookId: id, error: String(e) });
       return c.json({ error: String(e) }, 500);
+    } finally {
+      if (releaseLock) {
+        await releaseLock().catch(() => undefined);
+      }
     }
   });
 
@@ -6481,6 +6549,8 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
     return c.json({ assetRef, rev });
   });
 
+  registerLocalModelRoutes(app);
+
   return app;
 }
 
@@ -6523,12 +6593,14 @@ export async function startStudioServer(
       }
     });
 
-    // SPA fallback — serve index.html for all non-API routes
+    // SPA fallback — serve index.html for all non-API routes.
+    // Read on each request so vite rebuilds (new hashed assets) take effect
+    // without requiring a Studio process restart.
     const indexPath = joinPath(options.staticDir!, "index.html");
     if (existsSync(indexPath)) {
-      const indexHtml = await readFileFs(indexPath, "utf-8");
-      app.get("*", (c) => {
+      app.get("*", async (c) => {
         if (c.req.path.startsWith("/api/v1/")) return c.notFound();
+        const indexHtml = await readFileFs(indexPath, "utf-8");
         return c.html(indexHtml);
       });
     }

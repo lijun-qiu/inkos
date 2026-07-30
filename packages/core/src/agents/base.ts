@@ -1,4 +1,4 @@
-import type { LLMClient, LLMMessage, LLMResponse, OnStreamProgress } from "../llm/provider.js";
+import type { LLMClient, LLMMessage, LLMResponse, OnStreamProgress, OnThinkingDelta } from "../llm/provider.js";
 import { chatCompletion } from "../llm/provider.js";
 import { appendPromptPackGuidance } from "../prompts/prompt-pack.js";
 import { searchWeb, fetchUrl } from "../utils/web-search.js";
@@ -11,7 +11,14 @@ export interface AgentContext {
   readonly bookId?: string;
   readonly logger?: Logger;
   readonly onStreamProgress?: OnStreamProgress;
+  readonly onThinkingDelta?: OnThinkingDelta;
   readonly signal?: AbortSignal;
+  /**
+   * Optional separate endpoint for writer phase 2a/2b (state settlement).
+   * Lets creative draft stay on a cloud model while settlement runs locally.
+   */
+  readonly settlementClient?: LLMClient;
+  readonly settlementModel?: string;
 }
 
 export abstract class BaseAgent {
@@ -32,6 +39,22 @@ export abstract class BaseAgent {
     return chatCompletion(this.ctx.client, this.ctx.model, messages, {
       ...options,
       onStreamProgress: this.ctx.onStreamProgress,
+      onThinkingDelta: this.ctx.onThinkingDelta,
+      signal: this.ctx.signal,
+    });
+  }
+
+  /** Writer settlement (2a/2b) — prefers settlementClient/model when configured. */
+  protected async chatSettlement(
+    messages: ReadonlyArray<LLMMessage>,
+    options?: { readonly temperature?: number; readonly maxTokens?: number },
+  ): Promise<LLMResponse> {
+    const client = this.ctx.settlementClient ?? this.ctx.client;
+    const model = this.ctx.settlementModel ?? this.ctx.model;
+    return chatCompletion(client, model, messages, {
+      ...options,
+      onStreamProgress: this.ctx.onStreamProgress,
+      onThinkingDelta: this.ctx.onThinkingDelta,
       signal: this.ctx.signal,
     });
   }
@@ -58,6 +81,7 @@ export abstract class BaseAgent {
         ...options,
         webSearch: true,
         onStreamProgress: this.ctx.onStreamProgress,
+        onThinkingDelta: this.ctx.onThinkingDelta,
         signal: this.ctx.signal,
       });
     }

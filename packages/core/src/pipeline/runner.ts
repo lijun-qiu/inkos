@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import type { LLMClient, OnStreamProgress } from "../llm/provider.js";
+import type { LLMClient, OnStreamProgress, OnThinkingDelta } from "../llm/provider.js";
 import { chatCompletion, createLLMClient } from "../llm/provider.js";
 import type { Logger } from "../utils/logger.js";
 import type { BookConfig, FanficMode, RevisionGate } from "../models/book.js";
@@ -42,6 +42,7 @@ import {
 } from "../utils/outline-paths.js";
 import { loadNarrativeMemorySeed, loadSnapshotCurrentStateFacts } from "../state/runtime-state-store.js";
 import { rewriteStructuredStateFromMarkdown } from "../state/state-bootstrap.js";
+import { readFileSync } from "node:fs";
 import { readFile, readdir, writeFile, mkdir, rename, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import {
@@ -62,6 +63,64 @@ const SEQUENCE_LEVEL_CATEGORIES = new Set([
   "Opening Pattern Repetition", "开头同构",
   "Ending Pattern Repetition", "结尾同构",
 ]);
+
+function isLocalOllamaBaseUrl(baseUrl: string): boolean {
+  const normalized = baseUrl.toLowerCase();
+  return normalized.includes(":11434")
+    || normalized.includes("localhost:11434")
+    || normalized.includes("127.0.0.1:11434");
+}
+
+function normalizeLlmBaseUrl(baseUrl: string): string {
+  return baseUrl.trim().replace(/\/+$/, "").toLowerCase();
+}
+
+/** Infer InkOS service id from a well-known LLM host when override.baseUrl is set. */
+function inferServiceFromBaseUrl(baseUrl: string): string | undefined {
+  const host = normalizeLlmBaseUrl(baseUrl);
+  if (host.includes("generativelanguage.googleapis.com") || host.includes("ai.google.dev")) {
+    return "google";
+  }
+  if (host.includes("open.bigmodel.cn") || host.includes("bigmodel.cn")) {
+    return "zhipu";
+  }
+  if (host.includes("openrouter.ai")) {
+    return "openrouter";
+  }
+  if (isLocalOllamaBaseUrl(baseUrl)) return "ollama";
+  return undefined;
+}
+
+function resolveApiKeyFromEnvCandidates(...names: string[]): string {
+  for (const name of names) {
+    const value = process.env[name];
+    if (value) return value;
+  }
+  return "";
+}
+
+/** Prefer project `.inkos/secrets.json`, then common env vars for the service. */
+function resolveCrossEndpointApiKey(projectRoot: string, service: string): string {
+  try {
+    const raw = readFileSync(join(projectRoot, ".inkos", "secrets.json"), "utf-8");
+    const parsed = JSON.parse(raw) as { services?: Record<string, { apiKey?: string }> };
+    const fromSecrets = parsed.services?.[service]?.apiKey?.trim() ?? "";
+    if (fromSecrets) return fromSecrets;
+  } catch {
+    // secrets missing / unreadable — fall through to env
+  }
+  if (service === "google") {
+    return resolveApiKeyFromEnvCandidates("GOOGLE_API_KEY", "GEMINI_API_KEY");
+  }
+  if (service === "zhipu") {
+    return resolveApiKeyFromEnvCandidates("ZHIPU_API_KEY");
+  }
+  if (service === "openrouter") {
+    return resolveApiKeyFromEnvCandidates("OPENROUTER_API_KEY");
+  }
+  const envName = `${service.replace(/[^a-zA-Z0-9]/g, "_").toUpperCase()}_API_KEY`;
+  return resolveApiKeyFromEnvCandidates(envName);
+}
 
 function isSequenceLevelCategory(category: string): boolean {
   return SEQUENCE_LEVEL_CATEGORIES.has(category);
@@ -282,6 +341,7 @@ export interface PipelineConfig {
   readonly inputGovernanceMode?: InputGovernanceMode;
   readonly logger?: Logger;
   readonly onStreamProgress?: OnStreamProgress;
+  readonly onThinkingDelta?: OnThinkingDelta;
   readonly onContextCompression?: ContextCompressionCallback;
 }
 
@@ -612,6 +672,7 @@ export class PipelineRunner {
       bookId,
       logger: this.config.logger,
       onStreamProgress: this.config.onStreamProgress,
+      onThinkingDelta: this.config.onThinkingDelta,
     };
   }
 
@@ -629,34 +690,73 @@ export class PipelineRunner {
     }
     const base = this.config.defaultLLMConfig;
     const provider = override.provider ?? base?.provider ?? "custom";
-    const apiKeySource = override.apiKeyEnv
+    const localOllama = isLocalOllamaBaseUrl(override.baseUrl);
+    const sameEndpoint = Boolean(
+      base?.baseUrl && normalizeLlmBaseUrl(override.baseUrl) === normalizeLlmBaseUrl(base.baseUrl),
+    );
+    const matchedService = base?.services?.find(
+      (entry) => entry.baseUrl
+        && normalizeLlmBaseUrl(entry.baseUrl) === normalizeLlmBaseUrl(override.baseUrl!),
+    )?.service;
+    const inferredService = inferServiceFromBaseUrl(override.baseUrl);
+    // Cross-endpoint overrides (e.g. Google writer + Zhipu auditor) must not inherit
+    // the default service tag / API key — that reuses the wrong auth/transport.
+    const service = localOllama
+      ? "ollama"
+      : (matchedService ?? inferredService ?? (sameEndpoint ? (base?.service ?? "custom") : "custom"));
+    const projectSecretKey = (!localOllama && !sameEndpoint)
+      ? resolveCrossEndpointApiKey(this.config.projectRoot, service)
+      : "";
+    const apiKey = override.apiKeyEnv
+      ? (process.env[override.apiKeyEnv] ?? projectSecretKey)
+      : localOllama
+        ? "ollama"
+        : sameEndpoint
+          ? base?.apiKey ?? ""
+          : projectSecretKey;
+    const apiKeySource = override.apiKeyEnv && process.env[override.apiKeyEnv]
       ? `env:${override.apiKeyEnv}`
-      : `base:${base?.apiKey ?? ""}`;
+      : localOllama
+        ? "local:ollama"
+        : sameEndpoint
+          ? `base:${base?.apiKey ?? ""}`
+          : apiKey
+            ? `secrets:${service}`
+            : "cross-endpoint:missing-key";
+    // Google Gemini uses native google-generative-ai; keep openai for Zhipu/custom.
+    const clientProvider = service === "google"
+      ? "openai"
+      : (provider === "anthropic" ? "anthropic" : "openai");
     const stream = override.stream ?? base?.stream ?? true;
     const apiFormat = base?.apiFormat ?? "chat";
+    const proxyUrl = base?.proxyUrl;
     const cacheKey = [
-      provider,
+      service,
+      clientProvider,
       override.baseUrl,
       apiKeySource,
       `stream:${stream}`,
       `format:${apiFormat}`,
+      `proxy:${proxyUrl ?? ""}`,
     ].join("|");
     let client = this.agentClients.get(cacheKey);
     if (!client) {
-      const apiKey = override.apiKeyEnv
-        ? process.env[override.apiKeyEnv] ?? ""
-        : base?.apiKey ?? "";
       client = createLLMClient({
-        provider,
-        service: base?.service ?? "custom",
+        provider: clientProvider,
+        service,
         configSource: base?.configSource ?? "env",
-        baseUrl: override.baseUrl,
+        baseUrl: service === "google"
+          ? "https://generativelanguage.googleapis.com/v1beta"
+          : override.baseUrl,
         apiKey,
         model: override.model,
-        temperature: base?.temperature ?? 0.7,
-        thinkingBudget: base?.thinkingBudget ?? 0,
+        temperature: service === "google"
+          ? (base?.temperature ?? 1)
+          : (base?.temperature ?? 0.7),
+        thinkingBudget: sameEndpoint ? (base?.thinkingBudget ?? 0) : 0,
         apiFormat,
         stream,
+        ...(proxyUrl ? { proxyUrl } : {}),
       });
       this.agentClients.set(cacheKey, client);
     }
@@ -672,7 +772,30 @@ export class PipelineRunner {
       bookId,
       logger: this.config.logger?.child(agent),
       onStreamProgress: this.config.onStreamProgress,
+      onThinkingDelta: this.config.onThinkingDelta,
       signal: this.currentAbortSignal(),
+    };
+  }
+
+  /**
+   * Writer creative draft uses `writer` override; phase 2a/2b settlement prefers
+   * `settler`, then `chapter-analyzer`, so local models can absorb fact sync load.
+   */
+  private agentCtxForWriter(bookId?: string): AgentContext {
+    const base = this.agentCtxFor("writer", bookId);
+    const settleAgent = this.config.modelOverrides?.settler != null
+      ? "settler"
+      : this.config.modelOverrides?.["chapter-analyzer"] != null
+        ? "chapter-analyzer"
+        : null;
+    if (!settleAgent) return base;
+    const settle = this.resolveOverride(settleAgent);
+    if (settle.client === base.client && settle.model === base.model) return base;
+    return {
+      ...base,
+      settlementClient: settle.client,
+      settlementModel: settle.model,
+      logger: this.config.logger?.child(`writer+${settleAgent}`),
     };
   }
 
@@ -1087,7 +1210,7 @@ export class PipelineRunner {
         book.language ?? gp.language,
       );
 
-      const writer = new WriterAgent(this.agentCtxFor("writer", bookId));
+      const writer = new WriterAgent(this.agentCtxForWriter(bookId));
       this.logStage(stageLanguage, { zh: "撰写章节草稿", en: "writing chapter draft" });
       const output = await writer.writeChapter({
         book,
@@ -1734,7 +1857,7 @@ export class PipelineRunner {
     const parsedBookRules = (await readBookRules(bookDir))?.rules ?? null;
 
     // 1. Write chapter
-    const writer = new WriterAgent(this.agentCtxFor("writer", bookId));
+    const writer = new WriterAgent(this.agentCtxForWriter(bookId));
     this.logStage(stageLanguage, { zh: "撰写章节草稿", en: "writing chapter draft" });
     const output = await writer.writeChapter({
       book,
@@ -2129,7 +2252,7 @@ export class PipelineRunner {
       readFile(join(storyDir, "pending_hooks.md"), "utf-8").catch(() => ""),
     ]);
 
-    const writer = new WriterAgent(this.agentCtxFor("writer", bookId));
+    const writer = new WriterAgent(this.agentCtxForWriter(bookId));
     let repairedOutput = await writer.settleChapterState({
       book,
       bookDir,
@@ -2257,7 +2380,7 @@ export class PipelineRunner {
         { reuseExistingIntentWhenContextMissing: true },
       );
 
-    const writer = new WriterAgent(this.agentCtxFor("writer", bookId));
+    const writer = new WriterAgent(this.agentCtxForWriter(bookId));
     let syncedOutput = await writer.settleChapterState({
       book,
       bookDir,
@@ -2791,7 +2914,7 @@ ${matrix}`,
         en: `Step 2: Sequential replay from chapter ${startFrom}...`,
       }));
       const analyzer = new ChapterAnalyzerAgent(this.agentCtxFor("chapter-analyzer", input.bookId));
-      const writer = new WriterAgent(this.agentCtxFor("writer", input.bookId));
+      const writer = new WriterAgent(this.agentCtxForWriter(input.bookId));
       const countingMode = resolveLengthCountingMode(book.language ?? gp.language);
       let totalWords = 0;
       let importedCount = 0;

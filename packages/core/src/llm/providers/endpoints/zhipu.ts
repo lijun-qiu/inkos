@@ -24,7 +24,7 @@ export const ZHIPU: InkosEndpoint = {
     { id: "glm-5-turbo", maxOutput: 131072, contextWindowTokens: 200000, releasedAt: "2026-03-15" },
     { id: "glm-5", maxOutput: 131072, contextWindowTokens: 200000, enabled: true, releasedAt: "2026-02-12" },
     { id: "glm-4.7", maxOutput: 131072, contextWindowTokens: 200000, releasedAt: "2025-12-22" },
-    { id: "glm-4.7-flash", maxOutput: 131072, contextWindowTokens: 200000, enabled: true, releasedAt: "2026-01-19" },
+    { id: "glm-4.7-flash", maxOutput: 120000, contextWindowTokens: 200000, enabled: true, releasedAt: "2026-01-19" },
     { id: "glm-4.7-flashx", maxOutput: 131072, contextWindowTokens: 200000, releasedAt: "2026-01-19" },
     { id: "glm-5v-turbo", maxOutput: 131072, contextWindowTokens: 200000, enabled: true, releasedAt: "2026-04-02" },
     { id: "glm-4.6v", maxOutput: 32768, contextWindowTokens: 131072, releasedAt: "2025-12-08" },
@@ -44,7 +44,8 @@ export const ZHIPU: InkosEndpoint = {
     { id: "glm-z1-flashx", maxOutput: 32768, contextWindowTokens: 131072 },
     { id: "glm-z1-flash", maxOutput: 32768, contextWindowTokens: 131072 },
     { id: "glm-4-flash", maxOutput: 32768, contextWindowTokens: 131072, enabled: true },
-    { id: "glm-4-flash-250414", maxOutput: 32768, contextWindowTokens: 131072 },
+    // API enforces max_tokens ∈ [1, 16384] (verified 2026-07 against open.bigmodel.cn).
+    { id: "glm-4-flash-250414", maxOutput: 16384, contextWindowTokens: 131072 },
     { id: "glm-4-flashx", maxOutput: 4095, contextWindowTokens: 131072 },
     { id: "glm-4-long", maxOutput: 4095, contextWindowTokens: 1024000 },
     { id: "glm-4-air-250414", maxOutput: 16384, contextWindowTokens: 131072 },

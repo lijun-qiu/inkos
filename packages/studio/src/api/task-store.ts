@@ -19,6 +19,7 @@ export interface StudioTaskExecution {
     readonly status: "pending" | "active" | "completed";
   }>;
   readonly logs?: ReadonlyArray<string>;
+  readonly thinking?: string;
   readonly startedAt: number;
   readonly completedAt?: number;
 }

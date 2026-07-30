@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { ToolExecution } from "../../../store/chat/types";
-import { PipelineResultDetails, ToolExecutionSteps, UtilityExecutionRow, buildPlayRunStatusUrl, buildPlaySceneImageUrl, getGeneratedArtifactDetails, getPlayEditDetails, getPlayToolDetails, getProposedActionContractRows, getProposedActionDetails, groupToolExecutionsChronologically } from "../ToolExecutionSteps";
+import { PipelineResultDetails, ToolExecutionSteps, UtilityExecutionRow, buildPlayRunStatusUrl, buildPlaySceneImageUrl, getGeneratedArtifactDetails, getPlayEditDetails, getPlayToolDetails, getProposedActionContractRows, getProposedActionDetails, groupToolExecutionsChronologically, shouldDefaultOpenPipelineExecution, shouldDefaultOpenPipelineThinking } from "../ToolExecutionSteps";
 import { usePreferencesStore } from "../../../store/preferences";
 import { setAppLanguage } from "../../../lib/app-language";
 
@@ -661,5 +661,47 @@ describe("UtilityExecutionRow", () => {
 
     expect(html).toContain("grep 灯");
     expect(html).not.toContain("<details");
+  });
+});
+
+describe("pipeline thinking defaults", () => {
+  it("keeps writer thinking closed and auditor thinking open by default", () => {
+    expect(shouldDefaultOpenPipelineThinking("writer")).toBe(false);
+    expect(shouldDefaultOpenPipelineThinking("architect")).toBe(false);
+    expect(shouldDefaultOpenPipelineThinking("auditor")).toBe(true);
+    expect(shouldDefaultOpenPipelineThinking("reviser")).toBe(true);
+    expect(shouldDefaultOpenPipelineThinking("state-validator")).toBe(true);
+  });
+
+  it("keeps finished writer cards collapsed but opens audit cards", () => {
+    expect(shouldDefaultOpenPipelineExecution("writer", false)).toBe(false);
+    expect(shouldDefaultOpenPipelineExecution("auditor", false)).toBe(true);
+    expect(shouldDefaultOpenPipelineExecution("writer", true)).toBe(true);
+  });
+
+  it("renders collapsible pipeline thinking for writer (closed) and auditor (open)", () => {
+    const writer = makeExec({
+      id: "w1",
+      tool: "sub_agent",
+      agent: "writer",
+      label: "写作",
+      thinking: "先铺垫雨夜冲突。",
+    });
+    const auditor = makeExec({
+      id: "a1",
+      tool: "sub_agent",
+      agent: "auditor",
+      label: "审计",
+      thinking: "检查时间线是否自洽。",
+    });
+
+    const writerHtml = renderToStaticMarkup(React.createElement(ToolExecutionSteps, { executions: [writer] }));
+    const auditorHtml = renderToStaticMarkup(React.createElement(ToolExecutionSteps, { executions: [auditor] }));
+
+    // Writer: thinking block exists but stays collapsed (content not in SSR when closed).
+    expect(writerHtml).toContain("查看思考过程");
+    expect(writerHtml).not.toContain("先铺垫雨夜冲突。");
+    // Auditor: thinking opens by default so content is visible.
+    expect(auditorHtml).toContain("检查时间线是否自洽。");
   });
 });

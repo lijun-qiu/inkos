@@ -524,6 +524,9 @@ export function attachSessionStreamListeners({
                 ? { ...stage, status: "completed" as const, progress: undefined }
                 : stage,
             );
+            if (execution.thinkingStreaming) {
+              execution.thinkingStreaming = false;
+            }
             if (data.isError) execution.error = extractToolError(data.result);
             else execution.result = summarizeResult(data.result);
             const details = data.details ?? extractToolDetails(data.result);
@@ -552,10 +555,13 @@ export function attachSessionStreamListeners({
       flushTextDeltas();
       set((state) => ({
         sessions: updateSession(state.sessions, sessionId, (runtime) => {
-          const appendLog = (execution: ToolExecution): ToolExecution => ({
-            ...execution,
-            logs: appendBoundedToolLogs(execution.logs, [message]),
-          });
+          const appendLog = (execution: ToolExecution): ToolExecution => {
+            const withLog: ToolExecution = {
+              ...execution,
+              logs: appendBoundedToolLogs(execution.logs, [message]),
+            };
+            return advanceStagesFromLog(withLog, message);
+          };
           // 带 executionId 的日志（后台生产任务）按 id 精确定位工具卡；卡还没
           // 出现时直接丢弃这条（任务快照重放会带回累积的 logs），不能回退到
           // "最近一张运行中的卡"——那会把任务日志串排进并行聊天轮的工具卡。
@@ -581,6 +587,34 @@ export function attachSessionStreamListeners({
         totalChars: numberOrZero(data.totalChars),
         chineseChars: numberOrZero(data.chineseChars),
       });
+    } catch {
+      // ignore
+    }
+  });
+
+  streamEs.addEventListener("llm:thinking", (event: MessageEvent) => {
+    try {
+      const data = event.data ? JSON.parse(event.data) : null;
+      if (!sessionMatchesEvent(sessionId, data)) return;
+      const text = typeof data?.text === "string" ? data.text : "";
+      if (!text) return;
+      const executionId = eventExecutionId(data);
+      flushTextDeltas();
+      set((state) => ({
+        sessions: updateSession(state.sessions, sessionId, (runtime) => {
+          const appendThinking = (execution: ToolExecution): ToolExecution => ({
+            ...execution,
+            thinking: (execution.thinking ?? "") + text,
+            thinkingStreaming: true,
+          });
+          const messages = executionId
+            ? updateToolPartById(runtime.messages, executionId, appendThinking)
+            : updateLatestRunningToolMessage(runtime.messages, (execution) =>
+                execution.background ? null : appendThinking(execution),
+              );
+          return messages ? { messages } : {};
+        }),
+      }));
     } catch {
       // ignore
     }
@@ -722,4 +756,31 @@ function applyContextCompressionToParts(
   if (phase !== "start") execution.completedAt = Date.now();
   if (phase === "error") execution.error = data.message ?? `${compressionLabel(category)}${tr("失败", " failed")}`;
   if (!existing) parts.push({ type: "tool", execution });
+}
+
+/**
+ * Advance pipeline stages when a log line matches a known stage label
+ * (same idea as the sidebar ProgressSection).
+ */
+export function advanceStagesFromLog(execution: ToolExecution, message: string): ToolExecution {
+  const stages = execution.stages;
+  if (!stages || stages.length === 0) return execution;
+
+  const matchIndex = stages.findIndex((stage) =>
+    message.includes(stage.label) || stage.label.includes(message),
+  );
+  if (matchIndex < 0) return execution;
+
+  const next = stages.map((stage, index) => {
+    if (index < matchIndex) {
+      return stage.status === "completed" ? stage : { ...stage, status: "completed" as const, progress: undefined };
+    }
+    if (index === matchIndex) {
+      return { ...stage, status: "active" as const };
+    }
+    return stage.status === "active"
+      ? { ...stage, status: "pending" as const, progress: undefined }
+      : stage;
+  });
+  return { ...execution, stages: next };
 }

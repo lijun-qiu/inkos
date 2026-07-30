@@ -74,6 +74,51 @@ describe("saveServiceConfig", () => {
     });
   });
 
+  it("allows Ollama to validate and save without an API key", async () => {
+    const calls: string[] = [];
+    const bodies: unknown[] = [];
+    const fetchJsonImpl = vi.fn(async (path: string, init?: { body?: string }) => {
+      calls.push(path);
+      if (init?.body) bodies.push(JSON.parse(init.body));
+      if (path === "/services/ollama/test") {
+        return {
+          ok: true,
+          models: [{ id: "qwen3.5:9b" }],
+          selectedModel: "qwen3.5:9b",
+          detected: { apiFormat: "chat", stream: true },
+        };
+      }
+      if (path === "/services/ollama/secret") return { ok: true };
+      if (path === "/services/config") return { ok: true };
+      throw new Error(`unexpected path: ${path}`);
+    });
+
+    const result = await saveServiceConfig({
+      effectiveServiceId: "ollama",
+      serviceId: "ollama",
+      isCustom: false,
+      resolvedCustomName: "",
+      apiKey: "",
+      baseUrl: "",
+      apiFormat: "chat",
+      stream: true,
+      temperature: "0.7",
+      detectedModel: "",
+      fetchJsonImpl: fetchJsonImpl as never,
+    });
+
+    expect(calls).toEqual([
+      "/services/ollama/test",
+      "/services/ollama/secret",
+      "/services/config",
+    ]);
+    expect(bodies[0]).toMatchObject({ apiKey: "", apiFormat: "chat", stream: true });
+    expect(result).toMatchObject({
+      detectedModel: "qwen3.5:9b",
+      status: { state: "connected" },
+    });
+  });
+
   it("validates the upstream service before persisting secrets/config", async () => {
     const calls: string[] = [];
     const bodies: unknown[] = [];

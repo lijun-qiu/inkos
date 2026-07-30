@@ -173,6 +173,69 @@ describe("StateValidatorAgent", () => {
     expect(messages[1]?.content).not.toContain("[...truncated...]");
   });
 
+  it("finds PASS/FAIL after thinking prose and soft-passes unparseable output", async () => {
+    const agent = new StateValidatorAgent({
+      client: {
+        provider: "openai",
+        apiFormat: "chat",
+        stream: false,
+        defaults: {
+          temperature: 0.7,
+          maxTokens: 4096,
+          thinkingBudget: 0,
+          extra: {},
+        },
+      },
+      model: "test-model",
+      projectRoot: process.cwd(),
+    });
+
+    vi.spyOn(agent as unknown as { chat: (...args: unknown[]) => Promise<unknown> }, "chat")
+      .mockResolvedValue({
+        content: [
+          "<think>checking continuity carefully</think>",
+          "I reviewed the diffs.",
+          "PASS",
+          "[minor] Hook mention is brief",
+        ].join("\n"),
+        usage: ZERO_USAGE,
+      });
+
+    await expect(agent.validate(
+      "Chapter body.",
+      3,
+      "old state",
+      "new state",
+      "old hooks",
+      "new hooks",
+      "en",
+    )).resolves.toEqual({
+      passed: true,
+      warnings: [
+        { category: "general", description: "I reviewed the diffs." },
+        { category: "minor", description: "Hook mention is brief" },
+      ],
+    });
+
+    vi.spyOn(agent as unknown as { chat: (...args: unknown[]) => Promise<unknown> }, "chat")
+      .mockResolvedValue({
+        content: "这段状态看起来大体一致，没有硬冲突。",
+        usage: ZERO_USAGE,
+      });
+
+    const soft = await agent.validate(
+      "Chapter body.",
+      3,
+      "old state",
+      "new state",
+      "old hooks",
+      "new hooks",
+      "zh",
+    );
+    expect(soft.passed).toBe(true);
+    expect(soft.warnings[0]?.category).toBe("parse");
+  });
+
   it("throws when the validator model returns an empty response", async () => {
     const agent = new StateValidatorAgent({
       client: {

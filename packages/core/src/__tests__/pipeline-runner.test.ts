@@ -381,6 +381,60 @@ describe("PipelineRunner", () => {
     }
   });
 
+  it("routes writer settlement (2a/2b) to settler override when configured", () => {
+    const runner = new PipelineRunner({
+      client: {
+        provider: "openai",
+        apiFormat: "chat",
+        stream: false,
+        defaults: {
+          temperature: 0.7,
+          maxTokens: 4096,
+          thinkingBudget: 0,
+        },
+      } as ConstructorParameters<typeof PipelineRunner>[0]["client"],
+      model: "glm-writer",
+      projectRoot: process.cwd(),
+      defaultLLMConfig: {
+        provider: "openai",
+        service: "zhipu",
+        configSource: "env",
+        baseUrl: "https://open.bigmodel.cn/api/paas/v4",
+        apiKey: "zhipu-key",
+        model: "glm-writer",
+        temperature: 0.7,
+        thinkingBudget: 0,
+        apiFormat: "chat",
+        stream: false,
+      },
+      modelOverrides: {
+        writer: "glm-writer",
+        settler: {
+          model: "qwen3.5:9b",
+          provider: "openai",
+          baseUrl: "http://127.0.0.1:11434/v1",
+        },
+      },
+    });
+
+    const agentCtxForWriter = (
+      runner as unknown as {
+        agentCtxForWriter: (bookId?: string) => {
+          model: string;
+          settlementModel?: string;
+          settlementClient?: { service?: string };
+          client: { service?: string };
+        };
+      }
+    ).agentCtxForWriter.bind(runner);
+
+    const ctx = agentCtxForWriter("book-1");
+    expect(ctx.model).toBe("glm-writer");
+    expect(ctx.settlementModel).toBe("qwen3.5:9b");
+    expect(ctx.settlementClient?.service).toBe("ollama");
+    expect(ctx.client).not.toBe(ctx.settlementClient);
+  });
+
   it("initializes control documents during book creation", async () => {
     const root = await mkdtemp(join(tmpdir(), "inkos-init-book-test-"));
     const bookId = "bootstrap-book";

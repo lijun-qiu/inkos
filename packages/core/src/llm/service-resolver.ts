@@ -61,7 +61,11 @@ export async function resolveServiceModel(
   // Resolve API key after baseUrl/provider are known so local/self-hosted endpoints
   // such as Ollama can be used without forcing a fake secret.
   const apiKey = await getServiceApiKey(projectRoot, service);
-  if (!apiKey && !isApiKeyOptionalForEndpoint({ provider: preset?.providerFamily, baseUrl: effectiveBaseUrl })) {
+  const apiKeyOptional = isApiKeyOptionalForEndpoint({
+    provider: preset?.providerFamily,
+    baseUrl: effectiveBaseUrl,
+  });
+  if (!apiKey && !apiKeyOptional) {
     throw new Error(
       `API key not found for service "${service}". Add it in .inkos/secrets.json or set the environment variable.`,
     );
@@ -83,7 +87,10 @@ export async function resolveServiceModel(
 
   return {
     model,
-    apiKey: apiKey ?? "",
+    // pi-ai agent runtime rejects empty apiKey even for local Ollama.
+    // A local placeholder keeps Chat working; InkOS native transport also
+    // treats these placeholders as "no real key".
+    apiKey: apiKey || (apiKeyOptional ? "ollama" : ""),
     writingTemperature: preset?.writingTemperature,
     temperatureRange: preset?.temperatureRange,
     temperatureHint: preset?.temperatureHint,

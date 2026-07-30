@@ -148,7 +148,7 @@ export function buildPipelineConfig(
     projectRoot: root,
     defaultLLMConfig: config.llm,
     foundationReviewRetries: config.foundation.reviewRetries,
-    writingReviewRetries: config.writing?.reviewRetries ?? 1,
+    writingReviewRetries: config.writing?.reviewRetries ?? 5,
     chapterReviewMode: extra?.chapterReviewMode,
     revisionGate: extra?.revisionGate,
     modelOverrides: config.modelOverrides,

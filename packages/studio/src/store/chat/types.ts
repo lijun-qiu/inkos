@@ -30,6 +30,9 @@ export interface ToolExecution {
   error?: string;
   stages?: PipelineStage[];
   logs?: string[];
+  /** Pipeline LLM reasoning text (writer/auditor/etc.), separate from chat-agent thinking. */
+  thinking?: string;
+  thinkingStreaming?: boolean;
   startedAt: number;
   completedAt?: number;
   // 后台生产任务的工具卡（来自带 background 标记的 tool:start 或任务快照恢复）。

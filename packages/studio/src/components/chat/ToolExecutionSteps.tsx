@@ -12,6 +12,7 @@ import {
   ChevronDown,
   Wrench,
   Check,
+  Brain,
 } from "lucide-react";
 import { buildApiUrl } from "../../hooks/use-api";
 import { tr } from "../../lib/app-language";
@@ -21,6 +22,26 @@ import {
   NarrativeForecastPreview,
   getNarrativeForecastPreviewDetails,
 } from "./NarrativeForecastPreview";
+import {
+  Reasoning,
+  ReasoningContent,
+  ReasoningTrigger,
+} from "../ai-elements/reasoning";
+
+/** Agents whose reasoning is useful to inspect by default (audit / detection / revise). */
+export function shouldDefaultOpenPipelineThinking(agent: string | undefined): boolean {
+  return agent === "auditor"
+    || agent === "reviser"
+    || agent === "state-validator"
+    || agent === "detector"
+    || agent === "continuity";
+}
+
+/** Writing / book-setup keep thinking collapsed so the transcript stays scannable. */
+export function shouldDefaultOpenPipelineExecution(agent: string | undefined, isActive: boolean): boolean {
+  if (isActive) return true;
+  return shouldDefaultOpenPipelineThinking(agent);
+}
 
 // -- Status rendering helpers --
 
@@ -678,6 +699,40 @@ export function PipelineResultDetails({ result, defaultOpen }: { result: string;
   );
 }
 
+function PipelineThinking({
+  exec,
+}: {
+  exec: ToolExecution;
+}) {
+  const content = exec.thinking?.trim();
+  if (!content && !exec.thinkingStreaming) return null;
+  const defaultOpen = shouldDefaultOpenPipelineThinking(exec.agent);
+  return (
+    <div className="mx-3 mb-2 mt-1">
+      <Reasoning
+        isStreaming={exec.thinkingStreaming === true}
+        defaultOpen={defaultOpen}
+        className="mb-0 rounded-lg border border-border/40 bg-background/50 px-2.5 py-2"
+      >
+        <ReasoningTrigger
+          getThinkingMessage={(isStreaming, duration) => {
+            if (isStreaming) {
+              return <span>{tr("模型思考中…", "Model thinking…")}</span>;
+            }
+            if (duration === undefined) {
+              return <span>{tr("查看思考过程", "View thinking")}</span>;
+            }
+            return <span>{tr(`思考 ${duration}s`, `Thought ${duration}s`)}</span>;
+          }}
+        />
+        <ReasoningContent className="mt-2 max-h-64 overflow-auto text-xs leading-5">
+          {content || "…"}
+        </ReasoningContent>
+      </Reasoning>
+    </div>
+  );
+}
+
 function PipelineExecution({
   exec,
   onProposedAction,
@@ -694,20 +749,30 @@ function PipelineExecution({
   onRecheckNarrativeForecast?: (forecastId: string) => void | Promise<void>;
 }) {
   const isActive = exec.status === "running" || exec.status === "processing";
-  const [open, setOpen] = useState(isActive);
+  const [open, setOpen] = useState(() => shouldDefaultOpenPipelineExecution(exec.agent, isActive));
   const elapsedMs = useElapsedTimer(exec.startedAt, isActive);
   const toolDetailsDefaultOpen = usePreferencesStore((s) => s.toolDetailsDefaultOpen);
 
   useEffect(() => {
     if (exec.status === "running") setOpen(true);
-    if (exec.status === "completed") {
+    if (exec.status === "completed" || exec.status === "error") {
+      // Detection/audit stays open so the user can inspect; writing collapses.
+      if (shouldDefaultOpenPipelineThinking(exec.agent)) {
+        setOpen(true);
+        return;
+      }
       const timer = setTimeout(() => setOpen(false), 500);
       return () => clearTimeout(timer);
     }
-  }, [exec.status]);
+  }, [exec.status, exec.agent]);
 
   const bookId = exec.args?.bookId as string | undefined;
   const forecastDetails = getNarrativeForecastPreviewDetails(exec);
+  const hasExecDetails = Boolean(
+    (exec.stages && exec.stages.length > 0)
+    || (exec.logs && exec.logs.length > 0)
+    || (exec.status === "error" && exec.error),
+  );
 
   return (
     <Collapsible open={open} onOpenChange={setOpen} className="rounded-xl border border-border/40 bg-card/60">
@@ -717,6 +782,12 @@ function PipelineExecution({
             {exec.label}
             {bookId && <span className="text-muted-foreground font-normal"> · {bookId}</span>}
           </span>
+          {exec.thinkingStreaming && (
+            <span className="inline-flex items-center gap-1 text-[11px] text-muted-foreground shrink-0">
+              <Brain size={11} />
+              {tr("思考中", "Thinking")}
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-2 shrink-0">
           <span className="text-[12px] text-muted-foreground/60">
@@ -743,54 +814,60 @@ function PipelineExecution({
         onRecheck={onRecheckNarrativeForecast}
       />
       {!forecastDetails && typeof exec.result === "string" && exec.result.trim() && (
-        <PipelineResultDetails result={exec.result} defaultOpen={toolDetailsDefaultOpen} />
+        <PipelineResultDetails
+          result={exec.result}
+          defaultOpen={shouldDefaultOpenPipelineThinking(exec.agent) ? true : toolDetailsDefaultOpen}
+        />
       )}
-      <CollapsibleContent>
-        <div className="px-3 pb-3 pt-1">
-          {exec.stages && exec.stages.length > 0 && (
-            <ol className="mb-2 space-y-1.5">
-              {exec.stages.map((stage) => (
-                <li
-                  key={stage.label}
-                  className={[
-                    "flex items-start gap-2 rounded-lg px-2 py-1.5 text-xs",
-                    stage.status === "active" ? "bg-primary/5 text-foreground" : "text-muted-foreground",
-                  ].join(" ")}
-                >
-                  <StageIcon status={stage.status} />
-                  <div className="min-w-0 flex-1">
-                    <div className="truncate">{stage.label}</div>
-                    {stage.progress && (
-                      <div className="mt-0.5 text-[10px] text-muted-foreground/70">
-                        {formatProgress(stage.progress)}
-                      </div>
-                    )}
-                  </div>
-                </li>
-              ))}
-            </ol>
-          )}
-          {/* Real-time execution logs */}
-          {exec.logs && exec.logs.length > 0 && (
-            <ul className="space-y-0.5">
-              {exec.logs.map((log, i) => {
-                const isError = log.startsWith("[error]") || /error/i.test(log);
-                const isWarn = log.startsWith("[warning]") || /warning|警告/i.test(log);
-                return (
-                  <li key={i} className={`text-xs font-mono break-words ${isError ? "text-destructive" : isWarn ? "text-yellow-600 dark:text-yellow-400" : "text-muted-foreground"}`}>
-                    {log}
+      <PipelineThinking exec={exec} />
+      {hasExecDetails && (
+        <CollapsibleContent>
+          <div className="px-3 pb-3 pt-1">
+            {exec.stages && exec.stages.length > 0 && (
+              <ol className="mb-2 space-y-1.5">
+                {exec.stages.map((stage) => (
+                  <li
+                    key={stage.label}
+                    className={[
+                      "flex items-start gap-2 rounded-lg px-2 py-1.5 text-xs",
+                      stage.status === "active" ? "bg-primary/5 text-foreground" : "text-muted-foreground",
+                    ].join(" ")}
+                  >
+                    <StageIcon status={stage.status} />
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate">{stage.label}</div>
+                      {stage.progress && (
+                        <div className="mt-0.5 text-[10px] text-muted-foreground/70">
+                          {formatProgress(stage.progress)}
+                        </div>
+                      )}
+                    </div>
                   </li>
-                );
-              })}
-            </ul>
-          )}
-          {exec.status === "error" && exec.error && (
-            <div className="mt-2 text-xs text-destructive bg-destructive/5 rounded-lg px-2.5 py-2">
-              {exec.error}
-            </div>
-          )}
-        </div>
-      </CollapsibleContent>
+                ))}
+              </ol>
+            )}
+            {/* Real-time execution logs */}
+            {exec.logs && exec.logs.length > 0 && (
+              <ul className="space-y-0.5">
+                {exec.logs.map((log, i) => {
+                  const isError = log.startsWith("[error]") || /error/i.test(log);
+                  const isWarn = log.startsWith("[warning]") || /warning|警告/i.test(log);
+                  return (
+                    <li key={i} className={`text-xs font-mono break-words ${isError ? "text-destructive" : isWarn ? "text-yellow-600 dark:text-yellow-400" : "text-muted-foreground"}`}>
+                      {log}
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+            {exec.status === "error" && exec.error && (
+              <div className="mt-2 text-xs text-destructive bg-destructive/5 rounded-lg px-2.5 py-2">
+                {exec.error}
+              </div>
+            )}
+          </div>
+        </CollapsibleContent>
+      )}
     </Collapsible>
   );
 }

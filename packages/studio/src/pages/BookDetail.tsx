@@ -7,6 +7,12 @@ import { useColors } from "../hooks/use-colors";
 import { deriveBookActivity, shouldRefetchBookView } from "../hooks/use-book-activity";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "../components/ui/tooltip";
+import {
   ChevronLeft,
   Zap,
   FileText,
@@ -34,6 +40,7 @@ interface ChapterMeta {
   readonly title: string;
   readonly status: string;
   readonly wordCount: number;
+  readonly auditIssues?: ReadonlyArray<string>;
 }
 
 interface BookData {
@@ -80,6 +87,8 @@ const STATUS_CONFIG: Record<string, { color: string; icon: React.ReactNode }> = 
   drafted: { color: "text-muted-foreground bg-muted/20", icon: <FileText size={12} /> },
   "needs-revision": { color: "text-destructive bg-destructive/10", icon: <RotateCcw size={12} /> },
   imported: { color: "text-blue-500 bg-blue-500/10", icon: <Download size={12} /> },
+  "audit-failed": { color: "text-destructive bg-destructive/10", icon: <ShieldCheck size={12} /> },
+  "state-degraded": { color: "text-amber-600 bg-amber-500/10", icon: <Settings2 size={12} /> },
 };
 
 export function BookDetail({
@@ -103,6 +112,7 @@ export function BookDetail({
   const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
   const [rewritingChapters, setRewritingChapters] = useState<ReadonlyArray<number>>([]);
   const [revisingChapters, setRevisingChapters] = useState<ReadonlyArray<number>>([]);
+  const [auditingChapters, setAuditingChapters] = useState<ReadonlyArray<number>>([]);
   const [syncingChapters, setSyncingChapters] = useState<ReadonlyArray<number>>([]);
   const [savingSettings, setSavingSettings] = useState(false);
   const [settingsWordCount, setSettingsWordCount] = useState<number | null>(null);
@@ -220,6 +230,33 @@ export function BookDetail({
       alert(e instanceof Error ? e.message : "Rewrite failed");
     } finally {
       setRewritingChapters((prev) => prev.filter((n) => n !== chapterNum));
+    }
+  };
+
+  const handleAudit = async (chapterNum: number) => {
+    if (auditingChapters.includes(chapterNum)) return;
+    setAuditingChapters((prev) => [...prev, chapterNum]);
+    try {
+      const auditResult = await fetchJson<{
+        passed?: boolean;
+        issues?: unknown[];
+        status?: string;
+      }>(`/books/${bookId}/audit/${chapterNum}`, { method: "POST" });
+      const issueCount = auditResult.issues?.length ?? 0;
+      alert(
+        auditResult.passed
+          ? (data?.book.language === "en"
+            ? "Audit passed — status set to ready-for-review. You can Approve or Reject."
+            : "审计通过：状态已改为待审（ready-for-review）。可点 ✓ 通过或 ✕ 驳回。")
+          : (data?.book.language === "en"
+            ? `Audit failed: ${issueCount} issues (status remains audit-failed).`
+            : `审计未通过：${issueCount} 条问题（状态仍为 audit-failed）。`),
+      );
+      refetch();
+    } catch (e) {
+      alert(e instanceof Error ? e.message : "Audit failed");
+    } finally {
+      setAuditingChapters((prev) => prev.filter((n) => n !== chapterNum));
     }
   };
 
@@ -689,9 +726,9 @@ export function BookDetail({
         </div>
       </div>
 
-      {/* Chapters Table */}
-      <div className="paper-sheet rounded-2xl overflow-hidden border border-border/40 shadow-xl shadow-primary/5">
-        <div className="overflow-x-auto">
+      {/* Chapters Table — avoid overflow-hidden so row hover actions / tooltips are not clipped */}
+      <div className="paper-sheet rounded-2xl border border-border/40 shadow-xl shadow-primary/5">
+        <div className="overflow-x-auto overflow-y-visible">
           <table className="w-full text-sm border-collapse">
             <thead>
               <tr className="bg-muted/30 border-b border-border/50">
@@ -705,6 +742,16 @@ export function BookDetail({
             <tbody className="divide-y divide-border/30">
               {chapters.map((ch, index) => {
                 const staggerClass = `stagger-${Math.min(index + 1, 5)}`;
+                const statusCfg = STATUS_CONFIG[ch.status] ?? {
+                  color: "bg-muted text-muted-foreground",
+                  icon: <FileText size={12} />,
+                };
+                const statusBadge = (
+                  <div className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-tight ${statusCfg.color}`}>
+                    {statusCfg.icon}
+                    {translateChapterStatus(ch.status, t)}
+                  </div>
+                );
                 return (
                 <tr key={ch.number} className={`group hover:bg-primary/[0.02] transition-colors fade-in ${staggerClass}`}>
                   <td className="px-6 py-4 text-muted-foreground/60 font-mono text-xs">{ch.number.toString().padStart(2, '0')}</td>
@@ -718,13 +765,27 @@ export function BookDetail({
                   </td>
                   <td className="px-6 py-4 text-muted-foreground font-medium tabular-nums text-xs">{(ch.wordCount ?? 0).toLocaleString()}</td>
                   <td className="px-6 py-4">
-                    <div className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-tight ${STATUS_CONFIG[ch.status]?.color ?? "bg-muted text-muted-foreground"}`}>
-                      {STATUS_CONFIG[ch.status]?.icon}
-                      {translateChapterStatus(ch.status, t)}
-                    </div>
+                    {ch.auditIssues && ch.auditIssues.length > 0 ? (
+                      <TooltipProvider delay={200}>
+                        <Tooltip>
+                          <TooltipTrigger className="cursor-help text-left">
+                            {statusBadge}
+                          </TooltipTrigger>
+                          <TooltipContent
+                            side="bottom"
+                            align="start"
+                            className="max-w-md whitespace-pre-wrap text-left leading-relaxed"
+                          >
+                            {ch.auditIssues.join("\n")}
+                          </TooltipContent>
+                        </Tooltip>
+                      </TooltipProvider>
+                    ) : (
+                      statusBadge
+                    )}
                   </td>
                   <td className="px-6 py-4 text-right">
-                    <div className="flex gap-1.5 justify-end opacity-0 group-hover:opacity-100 transition-opacity">
+                    <div className="flex gap-1.5 justify-end">
                       {ch.status === "ready-for-review" && (
                         <>
                           <button
@@ -750,19 +811,15 @@ export function BookDetail({
                         </>
                       )}
                       <button
-                        onClick={async () => {
-                          try {
-                            const auditResult = await fetchJson<{ passed?: boolean; issues?: unknown[] }>(`/books/${bookId}/audit/${ch.number}`, { method: "POST" });
-                            alert(auditResult.passed ? "Audit passed" : `Audit failed: ${auditResult.issues?.length ?? 0} issues`);
-                            refetch();
-                          } catch (e) {
-                            alert(e instanceof Error ? e.message : "Audit failed");
-                          }
-                        }}
-                        className="p-2 rounded-lg bg-secondary text-muted-foreground hover:text-primary hover:bg-primary/10 transition-all shadow-sm"
-                        title={t("book.audit")}
+                        onClick={() => handleAudit(ch.number)}
+                        disabled={auditingChapters.includes(ch.number)}
+                        className="p-2 rounded-lg bg-secondary text-muted-foreground hover:text-primary hover:bg-primary/10 transition-all shadow-sm disabled:opacity-50"
+                        title={auditingChapters.includes(ch.number) ? t("book.auditing") : t("book.audit")}
+                        aria-busy={auditingChapters.includes(ch.number)}
                       >
-                        <ShieldCheck size={14} />
+                        {auditingChapters.includes(ch.number)
+                          ? <div className="w-3.5 h-3.5 border-2 border-muted-foreground/20 border-t-muted-foreground rounded-full animate-spin" />
+                          : <ShieldCheck size={14} />}
                       </button>
                       <button
                         onClick={() => handleRewrite(ch.number)}

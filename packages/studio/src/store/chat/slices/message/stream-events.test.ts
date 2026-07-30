@@ -3,9 +3,11 @@ import {
   MAX_TOOL_LOGS,
   applyStreamTextDeltas,
   appendBoundedToolLogs,
+  advanceStagesFromLog,
   createLatestEventThrottle,
   createStreamTextDeltaBatcher,
 } from "./stream-events";
+import type { ToolExecution } from "../../types";
 
 describe("stream event performance helpers", () => {
   afterEach(() => {
@@ -87,5 +89,26 @@ describe("stream event performance helpers", () => {
     expect(logs).toHaveLength(MAX_TOOL_LOGS);
     expect(logs[0]).toBe("old-21");
     expect(logs.at(-1)).toBe("latest");
+  });
+
+  it("advances pipeline stages from matching log messages", () => {
+    const execution: ToolExecution = {
+      id: "t1",
+      tool: "sub_agent",
+      agent: "writer",
+      label: "写作",
+      status: "running",
+      startedAt: Date.now(),
+      stages: [
+        { label: "准备章节输入", status: "pending" },
+        { label: "撰写章节草稿", status: "pending" },
+        { label: "落盘最终章节", status: "pending" },
+      ],
+    };
+
+    const next = advanceStagesFromLog(execution, "正在撰写章节草稿…");
+    expect(next.stages?.[0]?.status).toBe("completed");
+    expect(next.stages?.[1]?.status).toBe("active");
+    expect(next.stages?.[2]?.status).toBe("pending");
   });
 });

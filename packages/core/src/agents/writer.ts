@@ -587,7 +587,7 @@ export class WriterAgent extends BaseAgent {
       zh: `阶段 2a：提取第${params.chapterNumber}章事实`,
       en: `Phase 2a: observing facts for chapter ${params.chapterNumber}`,
     });
-    const observerResponse = await this.chat(
+    const observerResponse = await this.chatSettlement(
       [
         { role: "system", content: observerSystem },
         { role: "user", content: observerUser },
@@ -639,7 +639,7 @@ export class WriterAgent extends BaseAgent {
       validationFeedback: params.validationFeedback,
     });
 
-    const response = await this.chat(
+    const response = await this.chatSettlement(
       [
         { role: "system", content: settlerSystem },
         { role: "user", content: settlerUser },

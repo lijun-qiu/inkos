@@ -115,7 +115,11 @@ export async function resolveStudioLaunch(root: string): Promise<StudioLaunchSpe
   return null;
 }
 
-export async function launchStudioWorkbench(root: string, port: string): Promise<void> {
+export async function launchStudioWorkbench(
+  root: string,
+  port: string,
+  options: { readonly openBrowser?: boolean } = {},
+): Promise<void> {
   const prepared = await prepareStudioRoot(root);
   const url = prepared.initialized
     ? `http://localhost:${port}#/services`
@@ -144,17 +148,19 @@ export async function launchStudioWorkbench(root: string, port: string): Promise
     process.exit(1);
   });
 
-  const browserLaunch = resolveBrowserLaunch(process.platform, url);
-  const browser = spawn(browserLaunch.command, browserLaunch.args, {
-    cwd: root,
-    stdio: "ignore",
-    detached: true,
-  });
-  browser.on("error", () => {
-    // Best effort only — server startup should not fail just because browser open failed.
-  });
-  if (typeof browser.unref === "function") {
-    browser.unref();
+  if (options.openBrowser !== false) {
+    const browserLaunch = resolveBrowserLaunch(process.platform, url);
+    const browser = spawn(browserLaunch.command, browserLaunch.args, {
+      cwd: root,
+      stdio: "ignore",
+      detached: true,
+    });
+    browser.on("error", () => {
+      // Best effort only — server startup should not fail just because browser open failed.
+    });
+    if (typeof browser.unref === "function") {
+      browser.unref();
+    }
   }
 
   child.on("exit", (code) => {
@@ -166,6 +172,7 @@ export async function launchStudioEntry(
   root: string,
   port: string,
   hooks: StudioCommandHooks = {},
+  options: { readonly openBrowser?: boolean } = {},
 ): Promise<void> {
   const prepared = await prepareStudioRoot(root);
   if (prepared.initialized) {
@@ -177,17 +184,20 @@ export async function launchStudioEntry(
     return;
   }
 
-  await launchStudioWorkbench(prepared.root, port);
+  await launchStudioWorkbench(prepared.root, port, options);
 }
 
 export function createStudioCommand(hooks: StudioCommandHooks = {}): Command {
   return new Command("studio")
   .description("Start InkOS Studio web workbench")
   .option("-p, --port <port>", "Server port", "4567")
+  .option("--no-open", "Do not open the browser automatically")
   .action(async (opts) => {
     const root = findProjectRoot();
     const port = opts.port;
-    await launchStudioEntry(root, port, hooks);
+    // commander maps --no-open to open=false
+    const openBrowser = opts.open !== false;
+    await launchStudioEntry(root, port, hooks, { openBrowser });
   });
 }
 

@@ -20,11 +20,12 @@ export const OPENROUTER: InkosEndpoint = {
   baseUrl: "https://openrouter.ai/api/v1",
   // openrouter/auto 是 OpenRouter 官方的自动路由入口，长期存在；
   // 具体模型 id（如 google/gemma-2-9b-it:free）会随上游下架失效（issue #300）。
-  checkModel: "openrouter/auto",
+  checkModel: "nvidia/nemotron-3-ultra-550b-a55b:free",
   temperatureRange: [0, 2],
   defaultTemperature: 0.7,
   writingTemperature: 1,
   models: [
+    { id: "nvidia/nemotron-3-ultra-550b-a55b:free", maxOutput: 65536, contextWindowTokens: 262144, enabled: true, releasedAt: "2026-04-01" },
     { id: "openrouter/auto", maxOutput: 4096, contextWindowTokens: 2000000, enabled: true },
     { id: "deepseek/deepseek-chat-v3.1", maxOutput: 4096, contextWindowTokens: 163840, releasedAt: "2025-08-21" },
     { id: "google/gemini-3.1-flash-image-preview", maxOutput: 65536, contextWindowTokens: 131072, releasedAt: "2026-02-26" },

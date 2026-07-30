@@ -202,28 +202,55 @@ function groupAssistantParts(parts: ReadonlyArray<MessagePart>): AssistantRender
   return items;
 }
 
+/** Chat-agent reasoning that precedes a writer/architect tool stays collapsed. */
+function thinkingDefaultOpenForParts(
+  items: ReadonlyArray<AssistantRenderItem>,
+  index: number,
+  isStreaming: boolean,
+): boolean | undefined {
+  const next = items[index + 1];
+  if (next?.kind !== "tools") return undefined;
+  const agents = next.parts
+    .map((part) => part.execution.agent)
+    .filter((agent): agent is string => Boolean(agent));
+  if (agents.some((agent) => agent === "auditor" || agent === "reviser" || agent === "state-validator")) {
+    return true;
+  }
+  if (agents.some((agent) => agent === "writer" || agent === "architect")) {
+    return false;
+  }
+  return isStreaming ? undefined : false;
+}
+
 const AssistantMessageParts = memo(function AssistantMessageParts({
   parts,
   timestamp,
   theme,
   onProposedAction,
   onRejectProposedAction,
+  onOpenFilmStudio,
+  onSelectNarrativeBranch,
+  onRecheckNarrativeForecast,
 }: {
   readonly parts: ReadonlyArray<MessagePart>;
   readonly timestamp: number;
   readonly theme: Theme;
   readonly onProposedAction?: (details: ProposedActionDetails) => void;
   readonly onRejectProposedAction?: (details: ProposedActionDetails) => void;
+  readonly onOpenFilmStudio?: (projectId: string) => void;
+  readonly onSelectNarrativeBranch?: (forecastId: string, branchId: string) => void | Promise<void>;
+  readonly onRecheckNarrativeForecast?: (forecastId: string) => void | Promise<void>;
 }) {
   const items = useMemo(() => groupAssistantParts(parts), [parts]);
 
   return (
     <>
-      {items.map((item) => {
+      {items.map((item, index) => {
         if (item.kind === "thinking") {
+          const defaultOpen = thinkingDefaultOpenForParts(items, index, item.part.streaming);
           return (
             <div key={`t-${item.pi}`} className="mb-2">
-              <Reasoning isStreaming={item.part.streaming}>
+              <Reasoning isStreaming={item.part.streaming} defaultOpen={defaultOpen}>
                 <ReasoningTrigger />
                 <ReasoningContent>{item.part.content}</ReasoningContent>
               </Reasoning>
@@ -237,6 +264,9 @@ const AssistantMessageParts = memo(function AssistantMessageParts({
               executions={item.parts.map((part) => part.execution)}
               onProposedAction={onProposedAction}
               onRejectProposedAction={onRejectProposedAction}
+              onOpenFilmStudio={onOpenFilmStudio}
+              onSelectNarrativeBranch={onSelectNarrativeBranch}
+              onRecheckNarrativeForecast={onRecheckNarrativeForecast}
             />
           );
         }
@@ -284,7 +314,7 @@ function SkillPickerPanel({
   const folderInputRef = useRef<HTMLInputElement>(null);
 
   return (
-    <div className="absolute bottom-[calc(100%+10px)] left-0 z-40 w-full overflow-hidden rounded-2xl border border-border/60 bg-card/95 shadow-2xl backdrop-blur">
+    <div className="absolute bottom-[calc(100%+10px)] left-0 z-[100] w-full overflow-hidden rounded-2xl border border-border/60 bg-card/95 shadow-2xl backdrop-blur">
       <div className="border-b border-border/40 px-4 py-3">
         <div className="flex items-center justify-between gap-3">
           <div>
@@ -473,6 +503,7 @@ export function ChatPage({ activeBookId, mode = activeBookId ? "book" : "book-cr
   const fetchCustomModels = useServiceStore((s) => s.fetchCustomModels);
   const [configuredModelSelection, setConfiguredModelSelection] = useState<ChatPageModelPreference | null>(null);
   const [serviceConfigLoaded, setServiceConfigLoaded] = useState(false);
+  const appliedPreferenceKeyRef = useRef<string | null>(null);
 
   useEffect(() => { void fetchServices(); }, [fetchServices]);
   useEffect(() => {
@@ -528,9 +559,30 @@ export function ChatPage({ activeBookId, mode = activeBookId ? "book" : "book-cr
     return group ? `${group.label} · ${modelLabel}` : modelLabel;
   }, [groupedModels, selectedModel, selectedService, isZh]);
 
-  // Auto-select from saved service config first, then fall back to the first available model.
+  // Sync the picker to the project default whenever that default changes (or on
+  // first load). After that, keep the user's manual choice until the default
+  // in inkos.json / services config changes again.
   useEffect(() => {
     if (!serviceConfigLoaded) return;
+    const preferenceKey = configuredModelSelection
+      ? `${configuredModelSelection.service ?? ""}::${configuredModelSelection.model ?? ""}`
+      : "";
+
+    if (
+      preferenceKey
+      && preferenceKey !== appliedPreferenceKeyRef.current
+      && configuredModelSelection
+    ) {
+      const preferred = pickModelSelection(groupedModels, null, null, configuredModelSelection);
+      if (preferred) {
+        appliedPreferenceKeyRef.current = preferenceKey;
+        if (preferred.model !== selectedModel || preferred.service !== selectedService) {
+          setSelectedModel(preferred.model, preferred.service);
+        }
+        return;
+      }
+    }
+
     const nextSelection = pickModelSelection(
       groupedModels,
       selectedModel,
@@ -935,71 +987,16 @@ export function ChatPage({ activeBookId, mode = activeBookId ? "book" : "book-cr
                   <ChatMessage role="user" content={msg.content} timestamp={msg.timestamp} theme={theme} />
                 ) : msg.parts && msg.parts.length > 0 ? (
                   /* Assistant message — parts-based rendering (chronological) */
-                  /* Merge consecutive utility tool parts into one group */
-                  <>
-                    {(() => {
-                      type RenderItem =
-                        | { kind: "thinking"; pi: number; part: Extract<typeof msg.parts[0], { type: "thinking" }> }
-                        | { kind: "text"; pi: number; part: Extract<typeof msg.parts[0], { type: "text" }> }
-                        | { kind: "tools"; parts: Array<Extract<typeof msg.parts[0], { type: "tool" }>>; startIdx: number };
-
-                      const items: RenderItem[] = [];
-                      for (let pi = 0; pi < msg.parts!.length; pi++) {
-                        const part = msg.parts![pi];
-                        if (part.type === "thinking") {
-                          items.push({ kind: "thinking", pi, part });
-                        } else if (part.type === "text") {
-                          items.push({ kind: "text", pi, part });
-                        } else if (part.type === "tool") {
-                          // Merge consecutive tool parts into one group
-                          const last = items[items.length - 1];
-                          if (last?.kind === "tools") {
-                            last.parts.push(part);
-                          } else {
-                            items.push({ kind: "tools", parts: [part], startIdx: pi });
-                          }
-                        }
-                      }
-
-                      return items.map((item) => {
-                        if (item.kind === "thinking") {
-                          return (
-                            <div key={`t-${item.pi}`} className="mb-2">
-                              <Reasoning isStreaming={item.part.streaming}>
-                                <ReasoningTrigger />
-                                <ReasoningContent>{item.part.content}</ReasoningContent>
-                              </Reasoning>
-                            </div>
-                          );
-                        }
-                        if (item.kind === "tools") {
-                          return (
-                            <ToolExecutionSteps
-                              key={`x-${item.startIdx}`}
-                              executions={item.parts.map(p => p.execution)}
-                              onProposedAction={handleProposedAction}
-                              onRejectProposedAction={handleRejectProposedAction}
-                              onOpenFilmStudio={nav.toFilmStudio}
-                              onSelectNarrativeBranch={handleSelectNarrativeBranch}
-                              onRecheckNarrativeForecast={handleRecheckNarrativeForecast}
-                            />
-                          );
-                        }
-                        if (item.kind === "text" && item.part.content) {
-                          return (
-                            <ChatMessage
-                              key={`c-${item.pi}`}
-                              role="assistant"
-                              content={item.part.content}
-                              timestamp={msg.timestamp}
-                              theme={theme}
-                            />
-                          );
-                        }
-                        return null;
-                      });
-                    })()}
-                  </>
+                  <AssistantMessageParts
+                    parts={msg.parts}
+                    timestamp={msg.timestamp}
+                    theme={theme}
+                    onProposedAction={handleProposedAction}
+                    onRejectProposedAction={handleRejectProposedAction}
+                    onOpenFilmStudio={nav.toFilmStudio}
+                    onSelectNarrativeBranch={handleSelectNarrativeBranch}
+                    onRecheckNarrativeForecast={handleRecheckNarrativeForecast}
+                  />
                 ) : (
                   /* Assistant message — fallback (no parts, e.g. error messages) */
                   <ChatMessage
@@ -1252,7 +1249,7 @@ export function ChatPage({ activeBookId, mode = activeBookId ? "book" : "book-cr
                   <Palette size={17} />
                 </button>
                 {playImageMenuOpen ? (
-                  <div className="absolute bottom-12 right-0 z-30 w-44 rounded-xl border border-border/50 bg-card/95 p-2 shadow-xl backdrop-blur">
+                  <div className="absolute bottom-12 right-0 z-[100] w-44 rounded-xl border border-border/50 bg-card/95 p-2 shadow-xl backdrop-blur">
                     <div className="mb-1.5 px-1 text-[12px] leading-5 font-semibold uppercase tracking-wider text-muted-foreground/60">
                       {isZh ? "自动配图" : "Auto illustration"}
                     </div>

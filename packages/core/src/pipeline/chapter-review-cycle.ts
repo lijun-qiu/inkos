@@ -292,19 +292,21 @@ export async function runChapterReviewCycle(params: {
         break;
       }
 
-      // Check net improvement
-      if (nextAssessment.score >= currentAudit.score + NET_IMPROVEMENT_EPSILON) {
+      // Keep iterating until pass or max iterations. Local/noisy auditors often
+      // score flat or slightly down even when issues change; early-exit on
+      // "no net improvement" left chapters stuck at audit-failed after 1 try.
+      if (nextAssessment.score >= currentAudit.score) {
         finalContent = revisedContent;
         finalWordCount = revisedWordCount;
         postReviseCount = revisedWordCount;
         currentAudit = nextAssessment;
-        // Continue to next iteration
       } else {
         params.logWarn({
-          zh: `修复轮次 ${iteration + 1} 未净提升（${currentAudit.score} → ${nextAssessment.score}），退出循环`,
-          en: `repair iteration ${iteration + 1} no net improvement (${currentAudit.score} → ${nextAssessment.score}), exiting loop`,
+          zh: `修复轮次 ${iteration + 1} 分数未提升（${currentAudit.score} → ${nextAssessment.score}），保留当前最佳并继续修订`,
+          en: `repair iteration ${iteration + 1} score did not rise (${currentAudit.score} → ${nextAssessment.score}); keeping best and continuing`,
         });
-        break;
+        // Keep finalContent as the previous best; next revise retries from it.
+        // Still record the weaker snapshot so bestSnapshot selection can see it.
       }
     }
   }

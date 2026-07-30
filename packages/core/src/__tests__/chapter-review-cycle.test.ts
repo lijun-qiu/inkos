@@ -206,9 +206,9 @@ describe("runChapterReviewCycle v9", () => {
       maxReviewIterations: 2,
     });
 
-    // Should have attempted 2 revisions:
-    // iter 1: 70 → 80 (+10, net improvement)
-    // iter 2: 80 → 76 (no net improvement, stop)
+    // Should attempt both revision slots even when score dips:
+    // iter 1: 70 → 80 (adopt)
+    // iter 2: 80 → 76 (keep best, still consume the retry)
     expect(reviseChapter).toHaveBeenCalledTimes(2);
     expect(reviseChapter.mock.calls[0]?.[4]).toBe("auto");
 

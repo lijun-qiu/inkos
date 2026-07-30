@@ -144,6 +144,7 @@ const strings = {
   "book.saving": { zh: "保存中...", en: "Saving..." },
   "book.rewrite": { zh: "重写", en: "Rewrite" },
   "book.audit": { zh: "审计", en: "Audit" },
+  "book.auditing": { zh: "审计中…", en: "Auditing…" },
   "book.export": { zh: "导出", en: "Export" },
   "book.approvedOnly": { zh: "仅已通过", en: "Approved Only" },
   "book.manuscriptTitle": { zh: "章节标题", en: "Manuscript Title" },

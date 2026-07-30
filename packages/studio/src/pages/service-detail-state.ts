@@ -5,6 +5,31 @@ export interface ServiceDetailModelInfo {
   readonly name?: string;
 }
 
+const LOCAL_BANK_SERVICES = new Set(["ollama", "githubCopilot"]);
+
+/** Local/self-hosted endpoints can be saved and tested without a real API key. */
+export function isServiceApiKeyOptional(args: {
+  readonly serviceId: string;
+  readonly isCustom: boolean;
+  readonly baseUrl?: string;
+}): boolean {
+  if (LOCAL_BANK_SERVICES.has(args.serviceId)) return true;
+  if (!args.isCustom) return false;
+  const raw = args.baseUrl?.trim() ?? "";
+  if (!raw) return false;
+  try {
+    const host = new URL(raw).hostname.toLowerCase();
+    return host === "localhost"
+      || host === "127.0.0.1"
+      || host === "::1"
+      || host === "0.0.0.0"
+      || host === "host.docker.internal"
+      || host.endsWith(".local");
+  } catch {
+    return false;
+  }
+}
+
 export interface ServiceDetailDetectedConfig {
   readonly apiFormat?: "chat" | "responses";
   readonly stream?: boolean;
@@ -124,8 +149,13 @@ export async function saveServiceConfig(args: {
   const fetchJsonImpl = args.fetchJsonImpl ?? fetchJson;
   const trimmedKey = args.apiKey.trim();
   const trimmedBaseUrl = args.baseUrl.trim();
+  const apiKeyOptional = isServiceApiKeyOptional({
+    serviceId: args.isCustom ? args.effectiveServiceId : args.serviceId,
+    isCustom: args.isCustom,
+    baseUrl: trimmedBaseUrl,
+  });
 
-  if (!trimmedKey && !args.isCustom) {
+  if (!trimmedKey && !apiKeyOptional) {
     return {
       status: { state: "error", message: "请先输入 API Key" },
       detectedModel: "",

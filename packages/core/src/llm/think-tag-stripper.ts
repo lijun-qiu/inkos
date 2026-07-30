@@ -15,14 +15,22 @@ export interface LeadingThinkTagStripper {
   readonly flush: () => string;
 }
 
+export interface LeadingThinkTagStripperOptions {
+  /** Called once when a complete leading think block is stripped (inner text only). */
+  readonly onThinking?: (text: string) => void;
+}
+
 /**
  * 流式剥离器：只处理响应起始处的完整 <think>...</think> 块。
  * 在能确定"开头不是 think 块"之前先缓冲，不向外发出任何文本，
  * 保证思考内容不会先展示再消失以外——根本不会被发出。
  */
-export function createLeadingThinkTagStripper(): LeadingThinkTagStripper {
+export function createLeadingThinkTagStripper(
+  options?: LeadingThinkTagStripperOptions,
+): LeadingThinkTagStripper {
   let state: StripperState = "detecting";
   let pending = "";
+  let thinkEmitted = false;
 
   const push = (chunk: string): string => {
     if (state === "passthrough") return chunk;
@@ -51,6 +59,13 @@ export function createLeadingThinkTagStripper(): LeadingThinkTagStripper {
     const closeIndex = pending.indexOf(CLOSE_TAG);
     if (closeIndex < 0) return "";
     state = "passthrough";
+    if (!thinkEmitted) {
+      const leadingWhitespace = /^\s*/.exec(pending)![0];
+      const openAt = leadingWhitespace.length;
+      const inner = pending.slice(openAt + OPEN_TAG.length, closeIndex).trim();
+      if (inner) options?.onThinking?.(inner);
+      thinkEmitted = true;
+    }
     const afterClose = pending.slice(closeIndex + CLOSE_TAG.length).replace(/^\s+/, "");
     pending = "";
     return afterClose;

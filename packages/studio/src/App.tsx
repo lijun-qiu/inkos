@@ -33,6 +33,7 @@ import { setAppLanguage, tr } from "./lib/app-language";
 import { postApi, putApi, useApi } from "./hooks/use-api";
 import { Sun, Moon } from "lucide-react";
 import { House } from "lucide-react";
+import { LocalModelBar } from "./components/LocalModelBar";
 
 export type { HashRoute as Route } from "./hooks/use-hash-route";
 
@@ -181,7 +182,8 @@ export function App() {
       {/* Center Content */}
       <div className="flex-1 flex flex-col min-w-0 bg-background/30 backdrop-blur-sm">
         {/* Header Strip */}
-        <header className="h-14 shrink-0 flex items-center justify-between px-8 border-b border-border/40">
+        <header className="shrink-0 border-b border-border/40">
+          <div className="h-14 flex items-center justify-between px-8">
           <div className="flex items-center gap-2">
              <button
                onClick={nav.toDashboard}
@@ -223,6 +225,8 @@ export function App() {
               {isDark ? <Sun size={18} /> : <Moon size={18} />}
             </button>
           </div>
+          </div>
+          <LocalModelBar />
         </header>
 
         {/* Main Content Area */}

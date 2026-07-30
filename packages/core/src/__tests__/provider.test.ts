@@ -623,12 +623,23 @@ describe("chatCompletion via pi-ai", () => {
   });
 
   it("uses native fetch transport for local Ollama without an API key", async () => {
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({
-        choices: [{ message: { content: "本地 Ollama 可用" } }],
-        usage: { prompt_tokens: 3, completion_tokens: 4, total_tokens: 7 },
-      }),
+    const fetchMock = vi.fn(async (input: string | URL) => {
+      const url = String(input);
+      if (url.endsWith("/api/ps")) {
+        return {
+          ok: true,
+          json: async () => ({
+            models: [{ name: "Qwen3.6-35B-A3B-APEX-I-Mini.gguf", context_length: 32768 }],
+          }),
+        };
+      }
+      return {
+        ok: true,
+        json: async () => ({
+          choices: [{ message: { content: "本地 Ollama 可用" } }],
+          usage: { prompt_tokens: 3, completion_tokens: 4, total_tokens: 7 },
+        }),
+      };
     });
     vi.stubGlobal("fetch", fetchMock);
 
@@ -648,19 +659,73 @@ describe("chatCompletion via pi-ai", () => {
     ]);
 
     expect(result.content).toBe("本地 Ollama 可用");
-    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(fetchMock.mock.calls.some((call) => String(call[0]).includes("/chat/completions"))).toBe(true);
+    expect(mockCompleteSimple).not.toHaveBeenCalled();
+
+    vi.unstubAllGlobals();
+  });
+
+  it("uses native fetch transport for local Ollama even with placeholder api key", async () => {
+    const fetchMock = vi.fn(async (input: string | URL) => {
+      const url = String(input);
+      if (url.endsWith("/api/ps")) {
+        return {
+          ok: true,
+          json: async () => ({
+            models: [{ name: "deepseek-r1:14b", context_length: 32768 }],
+          }),
+        };
+      }
+      return {
+        ok: true,
+        json: async () => ({
+          choices: [{ message: { content: "placeholder key ok" } }],
+          usage: { prompt_tokens: 2, completion_tokens: 2, total_tokens: 4 },
+        }),
+      };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = makeClient(0.7, {
+      service: "ollama",
+      configSource: "studio",
+      stream: false,
+      _apiKey: "ollama",
+      _piModel: {
+        ...MOCK_PI_MODEL,
+        provider: "ollama",
+        baseUrl: "http://localhost:11434/v1",
+      },
+    });
+    const result = await chatCompletion(client, "deepseek-r1:14b", [
+      { role: "user", content: "ping" },
+    ]);
+
+    expect(result.content).toBe("placeholder key ok");
+    expect(fetchMock.mock.calls.some((call) => String(call[0]).includes("/chat/completions"))).toBe(true);
     expect(mockCompleteSimple).not.toHaveBeenCalled();
 
     vi.unstubAllGlobals();
   });
 
   it("uses native fetch transport for local custom OpenAI-compatible endpoints without an API key", async () => {
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({
-        choices: [{ message: { content: "本地自定义端点可用" } }],
-        usage: { prompt_tokens: 5, completion_tokens: 6, total_tokens: 11 },
-      }),
+    const fetchMock = vi.fn(async (_input: string | URL, _init?: RequestInit) => {
+      const url = String(_input);
+      if (url.endsWith("/api/ps")) {
+        return {
+          ok: true,
+          json: async () => ({
+            models: [{ name: "local-qwen", context_length: 32768 }],
+          }),
+        };
+      }
+      return {
+        ok: true,
+        json: async () => ({
+          choices: [{ message: { content: "本地自定义端点可用" } }],
+          usage: { prompt_tokens: 5, completion_tokens: 6, total_tokens: 11 },
+        }),
+      };
     });
     vi.stubGlobal("fetch", fetchMock);
 
@@ -678,8 +743,8 @@ describe("chatCompletion via pi-ai", () => {
     const result = await chatCompletion(client, "local-qwen", [{ role: "user", content: "ping" }]);
 
     expect(result.content).toBe("本地自定义端点可用");
-    expect(fetchMock).toHaveBeenCalledOnce();
-    expect(fetchMock.mock.calls[0]?.[1]?.headers).not.toHaveProperty("Authorization");
+    const chatCall = fetchMock.mock.calls.find((call) => String(call[0]).includes("/chat/completions"));
+    expect(chatCall?.[1]?.headers).not.toHaveProperty("Authorization");
     expect(mockCompleteSimple).not.toHaveBeenCalled();
 
     vi.unstubAllGlobals();
@@ -1107,5 +1172,151 @@ describe("stream interruption detection", () => {
 
     expect(result.content).toBe("第二次完整");
     expect(mockStreamSimple).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("rate-limit minute backoff", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  function nonStreamNativeClient(): LLMClient {
+    return makeClient(0.7, {
+      service: "zhipu",
+      stream: false,
+      _piModel: {
+        ...MOCK_PI_MODEL,
+        provider: "openai",
+        baseUrl: "https://open.bigmodel.cn/api/paas/v4",
+      },
+    });
+  }
+
+  function streamNativeClient(): LLMClient {
+    return makeClient(0.7, {
+      service: "zhipu",
+      stream: true,
+      _piModel: {
+        ...MOCK_PI_MODEL,
+        provider: "openai",
+        baseUrl: "https://open.bigmodel.cn/api/paas/v4",
+      },
+    });
+  }
+
+  function rateLimitResponse() {
+    return {
+      ok: false,
+      status: 429,
+      statusText: "Too Many Requests",
+      text: async () => "429 Too Many Requests",
+    };
+  }
+
+  function okJsonResponse(content: string) {
+    return {
+      ok: true,
+      json: async () => ({
+        choices: [{ message: { content } }],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      }),
+    };
+  }
+
+  function okSseResponse(content: string) {
+    const encoder = new TextEncoder();
+    const sse = [
+      `data: {"choices":[{"delta":{"content":${JSON.stringify(content)}}}]}\n\n`,
+      "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+      "data: [DONE]\n\n",
+    ].join("");
+    return {
+      ok: true,
+      body: new ReadableStream({
+        start(controller) {
+          controller.enqueue(encoder.encode(sse));
+          controller.close();
+        },
+      }),
+    };
+  }
+
+  it("retries 429 on the same primary model (no free Flash rotation)", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(rateLimitResponse())
+      .mockResolvedValueOnce(okJsonResponse("退避后成功"));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const resultPromise = chatCompletion(
+      nonStreamNativeClient(),
+      "glm-4.7-flash",
+      [{ role: "user", content: "hi" }],
+    );
+
+    // Same-model rate-limit backoff starts at 60s
+    await vi.advanceTimersByTimeAsync(60_000);
+    const result = await resultPromise;
+
+    expect(result.content).toBe("退避后成功");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const bodies = fetchMock.mock.calls.map((call) => JSON.parse(String((call[1] as { body?: string }).body)));
+    expect(bodies.map((b: { model: string }) => b.model)).toEqual([
+      "glm-4.7-flash",
+      "glm-4.7-flash",
+    ]);
+  });
+
+  it("retries 429 even when onTextDelta is set (rate limit before any chunk)", async () => {
+    vi.useFakeTimers();
+    const onTextDelta = vi.fn();
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(rateLimitResponse())
+      .mockResolvedValueOnce(okSseResponse("流式成功"));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const resultPromise = chatCompletion(
+      streamNativeClient(),
+      "glm-4.7-flash",
+      [{ role: "user", content: "hi" }],
+      { onTextDelta },
+    );
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    const result = await resultPromise;
+
+    expect(result.content).toBe("流式成功");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(onTextDelta).toHaveBeenCalledWith("流式成功");
+  });
+
+  it("does not retry mid-stream truncation when onTextDelta is set", async () => {
+    const encoder = new TextEncoder();
+    const truncated = {
+      ok: true,
+      body: new ReadableStream({
+        start(controller) {
+          controller.enqueue(encoder.encode(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"写到一半\"}}]}\n\n",
+          ));
+          controller.close();
+        },
+      }),
+    };
+    const fetchMock = vi.fn().mockResolvedValue(truncated);
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      chatCompletion(
+        streamNativeClient(),
+        "glm-4.7-flash",
+        [{ role: "user", content: "写" }],
+        { onTextDelta: vi.fn() },
+      ),
+    ).rejects.toThrow(/Stream interrupted|completion signal/);
+
+    // rateLimitOnly: mid-stream truncation must not be retried (would duplicate UI text)
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });

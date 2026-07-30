@@ -4184,6 +4184,29 @@ describe("createStudioServer daemon lifecycle", () => {
     );
   }, 60_000);
 
+  it("routes write-next from a leftover book-create session when activeBookId is set", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/v1/agent", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        instruction: "写下一章",
+        activeBookId: "demo-book",
+        sessionId: "agent-session-create",
+        sessionKind: "book-create",
+        actionSource: "free-text",
+      }),
+    });
+
+    const body = await response.json();
+    expect(response.status, JSON.stringify(body)).toBe(200);
+    expect(writeNextChapterMock).toHaveBeenCalledWith("demo-book");
+    expect(runAgentSessionMock).not.toHaveBeenCalled();
+    expect(body.response).toEqual(expect.stringContaining("已为 demo-book 完成第 3 章"));
+  }, 60_000);
+
   it("does not present audit-failed direct write-next as completed", async () => {
     writeNextChapterMock.mockResolvedValueOnce({
       chapterNumber: 3,
@@ -4211,7 +4234,7 @@ describe("createStudioServer daemon lifecycle", () => {
 
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({
-      response: expect.stringContaining("审稿未通过"),
+      response: expect.stringContaining("自动审改后仍未通过"),
       session: {
         sessionId: "agent-session-1",
         activeBookId: "demo-book",
@@ -4230,7 +4253,7 @@ describe("createStudioServer daemon lifecycle", () => {
               tool: "sub_agent",
               agent: "writer",
               status: "error",
-              result: expect.stringContaining("审稿未通过"),
+              result: expect.stringContaining("自动审改后仍未通过"),
               details: expect.objectContaining({ kind: "chapter_written", bookId: "demo-book", status: "audit-failed" }),
             }),
           ],
