@@ -29,6 +29,7 @@ describe("rehydrateServiceConnectionStatus", () => {
     expect(fetchJsonImpl).toHaveBeenCalledWith("/services/openai/secret");
     expect(result).toMatchObject({
       apiKey: "sk-live",
+      apiKeys: [],
       detectedModel: "",
       detectedConfig: null,
       status: { state: "idle" },

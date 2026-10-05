@@ -16,7 +16,7 @@ export async function processTuiAgentInput(params: {
   readonly onTextDelta?: (text: string) => void;
 }) {
   const config = await loadConfig({ requireApiKey: false, projectRoot: params.projectRoot });
-  const client = createLLMClient(config.llm);
+  const client = createLLMClient({ ...config.llm, projectRoot: params.projectRoot });
   const pipeline = new (await import("@actalk/inkos-core")).PipelineRunner(
     buildPipelineConfig(config, params.projectRoot, { quiet: true }),
   );

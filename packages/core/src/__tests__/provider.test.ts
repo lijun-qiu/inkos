@@ -996,18 +996,18 @@ describe("fitMaxTokensToContextWindow", () => {
 });
 
 describe("createLLMClient with providers lookup", () => {
-  it("openrouter Nemotron Super :free caps maxOutput below full context", async () => {
+  it("openrouter Laguna S :free uses bank maxOutput below full context", async () => {
     const { createLLMClient } = await import("../llm/provider.js");
     const { LLMConfigSchema } = await import("../models/project.js");
     const client = createLLMClient(LLMConfigSchema.parse({
       provider: "openai",
       service: "openrouter",
-      model: "nvidia/nemotron-3-super-120b-a12b:free",
+      model: "poolside/laguna-s-2.1:free",
       apiKey: "test",
       baseUrl: "https://openrouter.ai/api/v1",
     }));
-    expect(client.defaults.maxTokens).toBe(65_536);
-    expect(client._piModel?.maxTokens).toBe(65_536);
+    expect(client.defaults.maxTokens).toBe(32_768);
+    expect(client._piModel?.maxTokens).toBe(32_768);
     expect(client._piModel?.contextWindow).toBe(262_144);
     expect(client.defaults.maxTokens).toBeLessThan(client._piModel!.contextWindow);
   });
@@ -1080,6 +1080,34 @@ describe("createLLMClient with providers lookup", () => {
       baseUrl: "https://api.moonshot.cn/anthropic",
     }));
     expect(client._piModel?.id).toBe("k2p5");
+  });
+
+  it("魔搭 modelscope/deepseek-v4-flash 的 piModel.id 是 API deploymentName", async () => {
+    const { createLLMClient } = await import("../llm/provider.js");
+    const { LLMConfigSchema } = await import("../models/project.js");
+    const client = createLLMClient(LLMConfigSchema.parse({
+      provider: "openai",
+      service: "modelscope",
+      model: "modelscope/deepseek-v4-flash",
+      apiKey: "ms-test",
+      baseUrl: "http://127.0.0.1:10001",
+    }));
+    expect(client._piModel?.id).toBe("deepseek-ai/DeepSeek-V4-Flash-0731");
+    expect(client._piModel?.name).toBe("modelscope/deepseek-v4-flash");
+  });
+
+  it("官方 deepseek/deepseek-v4-flash 的 piModel.id 是无前缀短名", async () => {
+    const { createLLMClient } = await import("../llm/provider.js");
+    const { LLMConfigSchema } = await import("../models/project.js");
+    const client = createLLMClient(LLMConfigSchema.parse({
+      provider: "openai",
+      service: "deepseek",
+      model: "deepseek/deepseek-v4-flash",
+      apiKey: "sk-test",
+      baseUrl: "https://api.deepseek.com",
+    }));
+    expect(client._piModel?.id).toBe("deepseek-v4-flash");
+    expect(client._piModel?.name).toBe("deepseek/deepseek-v4-flash");
   });
 
   it("B7: 没有 deploymentName 的 model piModel.id 保持原 config.model", async () => {

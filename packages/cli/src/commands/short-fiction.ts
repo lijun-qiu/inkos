@@ -34,8 +34,8 @@ shortCommand
   .option("--story-id <id>", "Output story id under shorts/")
   .option("--out-dir <path>", "Output directory", "shorts")
   .option("--lang <language>", "Writing language: zh or en", "zh")
-  .option("--chapters <n>", "Complete short chapter count (12-18)", String(SHORT_FICTION_DEFAULT_CHAPTERS))
-  .option("--chars <n>", "Per-chapter length: zh characters (900-1200) or en words (600-800)")
+  .option("--chapters <n>", "Complete short chapter count (50-100)", String(SHORT_FICTION_DEFAULT_CHAPTERS))
+  .option("--chars <n>", "Per-chapter length: zh characters (1800-2200) or en words (1200-1500)")
   .option("--llm-base-url <url>", "Override LLM base URL")
   .option("--model <model>", "Fallback model for all short stages")
   .option("--planner-model <model>", "Model for outline creation/revision")
@@ -229,7 +229,7 @@ async function createShortRuntime(
     if (!String(e).includes("inkos.json not found")) throw e;
     const llmConfig = buildEnvLLMConfig(options);
     return {
-      client: createLLMClient(llmConfig),
+      client: createLLMClient({ ...llmConfig, projectRoot: root }),
       model: llmConfig.model,
     };
   }

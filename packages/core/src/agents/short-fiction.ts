@@ -17,20 +17,20 @@ import {
   buildShortFictionWriterUserPrompt,
 } from "../prompts/short-fiction.js";
 
-export const SHORT_FICTION_DEFAULT_CHAPTERS = 12;
-export const SHORT_FICTION_MIN_CHAPTERS = 12;
-export const SHORT_FICTION_MAX_CHAPTERS = 18;
-export const SHORT_FICTION_DEFAULT_CHARS_PER_CHAPTER = 1000;
-export const SHORT_FICTION_MIN_CHARS_PER_CHAPTER = 900;
-export const SHORT_FICTION_MAX_CHARS_PER_CHAPTER = 1200;
+export const SHORT_FICTION_DEFAULT_CHAPTERS = 50;
+export const SHORT_FICTION_MIN_CHAPTERS = 50;
+export const SHORT_FICTION_MAX_CHAPTERS = 100;
+export const SHORT_FICTION_DEFAULT_CHARS_PER_CHAPTER = 2000;
+export const SHORT_FICTION_MIN_CHARS_PER_CHAPTER = 1800;
+export const SHORT_FICTION_MAX_CHARS_PER_CHAPTER = 2200;
 
 // English shorts are calibrated in words, not characters. length-metrics.ts pins
 // the full-length chapter defaults at zh 3000 chars ≈ en 2000 words (a 2/3 ratio),
-// so the zh short range of 900/1000/1200 chars per chapter converts to
-// 600/650/800 words per chapter (1000 × 2/3 ≈ 667, rounded down to 650).
-export const SHORT_FICTION_EN_DEFAULT_WORDS_PER_CHAPTER = 650;
-export const SHORT_FICTION_EN_MIN_WORDS_PER_CHAPTER = 600;
-export const SHORT_FICTION_EN_MAX_WORDS_PER_CHAPTER = 800;
+// so the zh short range of 1800/2000/2200 chars per chapter converts to
+// 1200/1350/1500 words per chapter (2000 × 2/3 ≈ 1333, rounded to 1350).
+export const SHORT_FICTION_EN_DEFAULT_WORDS_PER_CHAPTER = 1350;
+export const SHORT_FICTION_EN_MIN_WORDS_PER_CHAPTER = 1200;
+export const SHORT_FICTION_EN_MAX_WORDS_PER_CHAPTER = 1500;
 
 export type { ShortFictionLanguage } from "../prompts/short-fiction.js";
 

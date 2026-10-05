@@ -264,7 +264,7 @@ configCommand
     try {
       const raw = await readFile(configPath, "utf-8");
       const config = JSON.parse(raw);
-      const defaultModel = config.llm?.model ?? "(not set)";
+      const defaultModel = config.llm?.defaultModel ?? config.llm?.model ?? "(not set)";
       const overrides: Record<string, unknown> = config.modelOverrides ?? {};
 
       if (opts.json) {

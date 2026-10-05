@@ -54,8 +54,8 @@ describe("service-presets regression", () => {
       const models = await listModelsForService("kkaiapi");
       expect(models.map((m) => m.id)).toEqual(expect.arrayContaining([
         "gpt-5.5",
-        "deepseek-v4-flash",
-        "deepseek-v4-pro",
+        "kkaiapi/deepseek-v4-flash",
+        "kkaiapi/deepseek-v4-pro",
       ]));
       expect(guessServiceFromBaseUrl("https://api.kkaiapi.com/v1")).toBe("kkaiapi");
     });

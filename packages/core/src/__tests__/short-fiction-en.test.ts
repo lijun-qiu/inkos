@@ -32,16 +32,16 @@ const CJK = /[一-鿿]/;
 
 const OUTLINE_INPUT = {
   direction: "revenge thriller inside a law firm, hidden evidence, final reversal",
-  chapterCount: 12,
-  charsPerChapter: 650,
+  chapterCount: 50,
+  charsPerChapter: 1350,
   reference: { text: "short reference sample" },
 };
 
 const DRAFT_INPUT = {
   direction: "revenge thriller inside a law firm",
   outlineMarkdown: "## Plan\nChapter 1: the setup scene",
-  chapterCount: 12,
-  charsPerChapter: 650,
+  chapterCount: 50,
+  charsPerChapter: 1350,
 };
 
 describe("short-fiction English prompt branch", () => {
@@ -58,8 +58,8 @@ describe("short-fiction English prompt branch", () => {
         direction: OUTLINE_INPUT.direction,
         outline: { rawContent: "the plan body" },
         review: "the back half sags",
-        chapterCount: 12,
-        charsPerChapter: 650,
+        chapterCount: 50,
+        charsPerChapter: 1350,
       }, "en"),
       writerSystem: buildShortFictionWriterSystemPrompt("en"),
       writerUser: buildShortFictionWriterUserPrompt(DRAFT_INPUT, "en"),
@@ -97,17 +97,17 @@ describe("short-fiction English prompt branch", () => {
     expect(prompt).toContain("=== SHORT_FICTION_TITLE ===");
     expect(prompt).toContain("=== SHORT_FICTION_OPENING_HOOK ===");
     expect(prompt).toContain("=== CHAPTER 1 TITLE ===");
-    expect(prompt).toContain("=== CHAPTER 12 CONTENT ===");
-    expect(prompt).toContain("650 words per chapter");
+    expect(prompt).toContain("=== CHAPTER 50 CONTENT ===");
+    expect(prompt).toContain("1350 words per chapter");
   });
 
   it("keeps the zh default identical to the explicit zh branch", () => {
     expect(buildShortFictionWriterSystemPrompt()).toBe(buildShortFictionWriterSystemPrompt("zh"));
     expect(buildShortFictionOutlineSystemPrompt()).toBe(buildShortFictionOutlineSystemPrompt("zh"));
     expect(buildShortFictionWriterSystemPrompt()).toContain("中文短篇 BatchWriter");
-    const zhWriterUser = buildShortFictionWriterUserPrompt({ ...DRAFT_INPUT, charsPerChapter: 1000 });
+    const zhWriterUser = buildShortFictionWriterUserPrompt({ ...DRAFT_INPUT, charsPerChapter: 2000 });
     expect(zhWriterUser).toContain("高潮即场景");
-    expect(zhWriterUser).toContain("每章约 1000 字");
+    expect(zhWriterUser).toContain("每章约 2000 字");
   });
 });
 
@@ -176,19 +176,19 @@ describe("short-fiction runner English branch", () => {
     return { planner: context, outlineReview: context, writer: context, draftReview: context, revise: context, package: context };
   }
 
-  it("bounds en charsPerChapter in words (600-800), rejecting the zh char range", async () => {
+  it("bounds en charsPerChapter in words (1200-1500), rejecting the zh char range", async () => {
     await expect(runShortFictionProduction({
       projectRoot: root,
       direction: "haunted elevator",
       language: "en",
-      charsPerChapter: 1000,
+      charsPerChapter: 2000,
       cover: false,
       runtimes: runtimes(root),
-    })).rejects.toThrow(/charsPerChapter must be an integer between 600 and 800/);
+    })).rejects.toThrow(/charsPerChapter must be an integer between 1200 and 1500/);
   });
 
   it("threads language and the en word default through the pipeline and artifacts", async () => {
-    const CH = 12;
+    const CH = 50;
     await mkdir(join(root, "shorts", "extra-floor", "outline"), { recursive: true });
     await writeFile(join(root, "shorts", "extra-floor", "outline", "v002.md"), "## Existing plan", "utf-8");
 
@@ -221,9 +221,9 @@ describe("short-fiction runner English branch", () => {
       runtimes: runtimes(root),
     });
 
-    expect(writeDraft).toHaveBeenCalledWith(expect.objectContaining({ language: "en", charsPerChapter: 650 }));
+    expect(writeDraft).toHaveBeenCalledWith(expect.objectContaining({ language: "en", charsPerChapter: 1350 }));
     const final = await readFile(join(root, "shorts", "extra-floor", "final", "full.md"), "utf-8");
-    expect(final).toContain("## Chapter 12: Room 12");
+    expect(final).toContain("## Chapter 50: Room 50");
     expect(CJK.test(final)).toBe(false);
     const chapterFile = await readFile(join(root, "shorts", "extra-floor", "final", "chapters", "0001.md"), "utf-8");
     expect(chapterFile.startsWith("# Chapter 1: Room 1")).toBe(true);

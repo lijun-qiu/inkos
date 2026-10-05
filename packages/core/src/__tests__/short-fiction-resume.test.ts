@@ -14,7 +14,7 @@ import {
 } from "../agents/short-fiction.js";
 import { runShortFictionProduction } from "../pipeline/short-fiction-runner.js";
 
-const CH = 12;
+const CH = 50;
 const DRAFT_MD = `
 === SHORT_FICTION_TITLE ===
 电梯多一层
@@ -87,7 +87,7 @@ describe("short fiction resume + failure marker (C2)", () => {
 
     const result = await runShortFictionProduction({
       projectRoot: root, direction: "恐怖短篇", storyId: "elevator",
-      chapterCount: CH, charsPerChapter: 1000, cover: false, runtimes: runtimes(root),
+      chapterCount: CH, charsPerChapter: 2000, cover: false, runtimes: runtimes(root),
     });
 
     expect(createOutline).not.toHaveBeenCalled();   // outline resumed from disk
@@ -104,7 +104,7 @@ describe("short fiction resume + failure marker (C2)", () => {
 
     await expect(runShortFictionProduction({
       projectRoot: root, direction: "恐怖短篇", storyId: "elevator",
-      chapterCount: CH, charsPerChapter: 1000, cover: false, runtimes: runtimes(root),
+      chapterCount: CH, charsPerChapter: 2000, cover: false, runtimes: runtimes(root),
     })).rejects.toThrow(/503/);
 
     const status = JSON.parse(await readFile(join(root, "shorts", "elevator", "status.json"), "utf-8"));
@@ -127,7 +127,7 @@ describe("short fiction resume + failure marker (C2)", () => {
 
     await runShortFictionProduction({
       projectRoot: root, direction: "恐怖短篇", storyId: "elevator",
-      chapterCount: CH, charsPerChapter: 1000, cover: false, runtimes: runtimes(root),
+      chapterCount: CH, charsPerChapter: 2000, cover: false, runtimes: runtimes(root),
     });
 
     expect(continueDraft).toHaveBeenCalled();
@@ -154,7 +154,7 @@ describe("short fiction resume + failure marker (C2)", () => {
 
     await runShortFictionProduction({
       projectRoot: root, direction: "恐怖短篇", storyId: "elevator",
-      chapterCount: CH, charsPerChapter: 1000, cover: false, runtimes: runtimes(root),
+      chapterCount: CH, charsPerChapter: 2000, cover: false, runtimes: runtimes(root),
     });
 
     expect(continueDraft).toHaveBeenCalledTimes(2);
@@ -176,7 +176,7 @@ describe("short fiction resume + failure marker (C2)", () => {
 
     await runShortFictionProduction({
       projectRoot: root, direction: "恐怖短篇", storyId: "elevator",
-      chapterCount: CH, charsPerChapter: 1000, cover: false, runtimes: runtimes(root),
+      chapterCount: CH, charsPerChapter: 2000, cover: false, runtimes: runtimes(root),
     });
 
     const warning = await readFile(join(root, "shorts", "elevator", "reviews", "draft-v002-warning.md"), "utf-8");
@@ -192,7 +192,7 @@ describe("short fiction resume + failure marker (C2)", () => {
 
     const result = await runShortFictionProduction({
       projectRoot: root, direction: "恐怖短篇", storyId: "elevator",
-      chapterCount: CH, charsPerChapter: 1000, cover: false, runtimes: runtimes(root),
+      chapterCount: CH, charsPerChapter: 2000, cover: false, runtimes: runtimes(root),
     });
 
     expect(writeDraft).not.toHaveBeenCalled();       // nothing regenerated
@@ -210,7 +210,7 @@ describe("short fiction resume + failure marker (C2)", () => {
 
     const result = await runShortFictionProduction({
       projectRoot: root, direction: "恐怖短篇", storyId: "elevator",
-      chapterCount: CH, charsPerChapter: 1000, cover: false, runtimes: runtimes(root),
+      chapterCount: CH, charsPerChapter: 2000, cover: false, runtimes: runtimes(root),
     });
 
     expect(result.coverError).toBe("disabled");

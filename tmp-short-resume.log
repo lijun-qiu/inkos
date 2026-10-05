@@ -1,0 +1,15 @@
+﻿node.exe : (node:35072) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+所在位置 C:\Users\19183\AppData\Local\Temp\ps-script-9acf2559-12d6-4355-b3fb-cfec29c665ef.ps1:84 字符: 1
++ & node 'c:\project\inkos\packages\cli\dist\index.js' short run --dire ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ((node:35072) Ex...nge at any time:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+(Use `node --trace-warnings ...` to show where the warning was created)
+Resuming from existing outline (skipping outline stages)...
+Writing full short fiction draft...
+[llm] transport/connect blip 鈥?rewriting attempt 1/8 after 2s
+[llm] transport/connect blip 鈥?rewriting attempt 2/8 after 5s
+[llm] transport/connect blip 鈥?rewriting attempt 3/8 after 10s
+[llm] transport/connect blip 鈥?rewriting attempt 4/8 after 20s
+[llm] transport/connect blip 鈥?rewriting attempt 5/8 after 40s

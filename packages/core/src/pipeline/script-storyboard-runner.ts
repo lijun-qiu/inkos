@@ -6,7 +6,6 @@ import { saveStoryGraph } from "../interactive-film/graph-store.js";
 import type { StoryGraph } from "../interactive-film/graph-schema.js";
 import {
   InteractiveFilmCreationAgent,
-  ScriptCreationAgent,
   StoryboardCreationAgent,
   extractStoryboardImagePrompts,
   extractMarkdownSection,
@@ -19,6 +18,19 @@ import {
   type ScriptTargetFormat,
   type StoryboardCreationInput,
 } from "../agents/script-storyboard.js";
+import {
+  SCRIPT_DRAFT_COMPLETION_ATTEMPTS,
+  SCRIPT_EPISODE_WAVE_SIZE,
+  ScriptEpisodePipelineAgent,
+  assembleScriptMarkdown,
+  countFilledEpisodes,
+  findEmptyScriptEpisodes,
+  parseScriptBatchDraft,
+  renderScriptDraftMarkdown,
+  resolveScriptEpisodePlan,
+  validateScriptDraftForFinal,
+  type ScriptBatchDraft,
+} from "../agents/script-episode.js";
 import { safeChildPath } from "../utils/path-safety.js";
 import { toPosixPath } from "../utils/posix-path.js";
 
@@ -84,6 +96,8 @@ export interface ScriptCreationRunResult {
   readonly baseDir: string;
   readonly specPath: string;
   readonly scriptPath: string;
+  readonly outlinePath?: string;
+  readonly draftPath?: string;
 }
 
 export interface InteractiveFilmCreationRunResult {
@@ -148,40 +162,181 @@ export interface StoryboardAssetsManifest {
 export async function runScriptCreation(
   options: ScriptCreationRunOptions,
 ): Promise<ScriptCreationRunResult> {
+  const language = options.language ?? "zh";
   const projectId = safeSegment(options.projectId ?? slugify(options.title));
   const baseDir = resolveProjectBaseDir(options.outDir ?? "dramas", projectId);
   const sourceText = await resolveSourceText(options.projectRoot, options.sourceText, options.sourcePath);
+  const requirements = mergeRequirements(options.instruction, options.requirements, language);
+  const plan = resolveScriptEpisodePlan({
+    requirements,
+    episodeCount: options.episodeCount,
+    language,
+    sourceText,
+  });
   const input: ScriptCreationInput = {
     title: options.title,
     sourceKind: options.sourceKind,
     targetFormat: options.targetFormat,
     sourceText,
-    requirements: mergeRequirements(options.instruction, options.requirements, options.language),
-    episodeCount: options.episodeCount,
+    requirements,
+    episodeCount: plan.episodeCount,
     episodeDuration: options.episodeDuration,
-    language: options.language,
+    language,
   };
 
-  options.onProgress?.("Writing script creation spec...");
-  const spec = renderScriptSpec(input);
-  await writeProjectText(options.projectRoot, join(baseDir, "script-spec.md"), spec);
+  const progress = (message: string) => options.onProgress?.(message);
+  const writeStatus = async (status: Record<string, unknown>) => {
+    await writeProjectText(options.projectRoot, join(baseDir, "status.json"), JSON.stringify({
+      kind: "script",
+      title: options.title,
+      episodeCount: plan.episodeCount,
+      charsPerEpisode: plan.charsPerEpisode,
+      targetLength: plan.targetLength,
+      ...status,
+      updatedAt: new Date().toISOString(),
+    }, null, 2));
+  };
 
-  options.onProgress?.("Writing script draft...");
-  const agent = new ScriptCreationAgent(options.runtime);
-  const script = normalizeScriptEpisodeEndLabels(await agent.writeScript(input));
+  progress(language === "en" ? "Writing script creation spec..." : "正在写剧本规格...");
+  await writeProjectText(options.projectRoot, join(baseDir, "script-spec.md"), renderScriptSpec(input));
+  await writeStatus({ status: "running", phase: "spec" });
+
+  const agent = new ScriptEpisodePipelineAgent(options.runtime);
+  progress(language === "en"
+    ? `Creating outline for ${plan.episodeCount} episodes...`
+    : `正在生成 ${plan.episodeCount} 集分集大纲...`);
+  const outlineMarkdown = await agent.createEpisodeOutline({
+    ...input,
+    episodeCount: plan.episodeCount,
+    charsPerEpisode: plan.charsPerEpisode,
+  });
+  const outlinePath = relPath(baseDir, "outline/v001.md");
+  await writeProjectText(options.projectRoot, join(baseDir, "outline/v001.md"), outlineMarkdown);
+  await writeStatus({ status: "running", phase: "outline", filledEpisodes: 0 });
+
+  let draft: ScriptBatchDraft = parseScriptBatchDraft("", {
+    expectedEpisodes: plan.episodeCount,
+    language,
+    titleFallback: options.title,
+  });
+
+  for (let start = 1; start <= plan.episodeCount; start += SCRIPT_EPISODE_WAVE_SIZE) {
+    const end = Math.min(plan.episodeCount, start + SCRIPT_EPISODE_WAVE_SIZE - 1);
+    progress(language === "en"
+      ? `Writing episodes ${start}-${end}/${plan.episodeCount}...`
+      : `正在写第 ${start}-${end}/${plan.episodeCount} 集...`);
+
+    const beforeFilled = countFilledEpisodes(draft);
+    draft = await agent.writeEpisodeWave({
+      ...input,
+      episodeCount: plan.episodeCount,
+      charsPerEpisode: plan.charsPerEpisode,
+      outlineMarkdown,
+      startEpisode: start,
+      endEpisode: end,
+      priorDraft: draft,
+    });
+
+    // Anti-stall: one empty-wave retry, then continue so missing-fill can recover.
+    const waveFilled = draft.episodes
+      .slice(start - 1, end)
+      .filter((ep) => ep.content.trim()).length;
+    if (waveFilled === 0) {
+      progress(language === "en"
+        ? `Wave ${start}-${end} empty, retrying once...`
+        : `第 ${start}-${end} 集本波为空，重试一次...`);
+      draft = await agent.writeEpisodeWave({
+        ...input,
+        episodeCount: plan.episodeCount,
+        charsPerEpisode: plan.charsPerEpisode,
+        outlineMarkdown,
+        startEpisode: start,
+        endEpisode: end,
+        priorDraft: draft,
+      });
+    }
+
+    const filled = countFilledEpisodes(draft);
+    await writeProjectText(
+      options.projectRoot,
+      join(baseDir, "drafts/v001-partial.md"),
+      renderScriptDraftMarkdown(draft, language),
+    );
+    await writeStatus({
+      status: "running",
+      phase: "draft",
+      wave: `${start}-${end}`,
+      filledEpisodes: filled,
+      units: filled,
+      progressed: filled > beforeFilled,
+    });
+  }
+
+  let missing = findEmptyScriptEpisodes(draft);
+  let stagnantRounds = 0;
+  for (let attempt = 1; attempt <= SCRIPT_DRAFT_COMPLETION_ATTEMPTS && missing.length > 0; attempt += 1) {
+    const before = missing.length;
+    progress(language === "en"
+      ? `Filling missing episodes (${missing.slice(0, SCRIPT_EPISODE_WAVE_SIZE).join(", ")})...`
+      : `正在补空集：${missing.slice(0, SCRIPT_EPISODE_WAVE_SIZE).join("、")}...`);
+    draft = await agent.continueMissingEpisodes({
+      ...input,
+      episodeCount: plan.episodeCount,
+      charsPerEpisode: plan.charsPerEpisode,
+      outlineMarkdown,
+      draft,
+    });
+    missing = findEmptyScriptEpisodes(draft);
+    await writeProjectText(
+      options.projectRoot,
+      join(baseDir, "drafts/v001-partial.md"),
+      renderScriptDraftMarkdown(draft, language),
+    );
+    await writeStatus({
+      status: "running",
+      phase: "fill",
+      attempt,
+      filledEpisodes: countFilledEpisodes(draft),
+      missingEpisodes: missing,
+    });
+    if (missing.length >= before) {
+      stagnantRounds += 1;
+      if (stagnantRounds >= 2) {
+        throw new Error(language === "en"
+          ? `Script generation stalled with empty episodes: ${missing.join(", ")}`
+          : `剧本生成卡住，仍有空集：${missing.join("、")}`);
+      }
+    } else {
+      stagnantRounds = 0;
+    }
+  }
+
+  validateScriptDraftForFinal(draft);
+  const draftPath = relPath(baseDir, "drafts/v001.md");
+  await writeProjectText(
+    options.projectRoot,
+    join(baseDir, "drafts/v001.md"),
+    renderScriptDraftMarkdown(draft, language),
+  );
+
+  progress(language === "en" ? "Assembling final script..." : "正在组装成稿...");
+  const script = normalizeScriptEpisodeEndLabels(assembleScriptMarkdown(draft, language));
   await writeProjectText(options.projectRoot, join(baseDir, "script.md"), script);
-  await writeProjectText(options.projectRoot, join(baseDir, "status.json"), JSON.stringify({
+  await writeStatus({
     status: "completed",
-    kind: "script",
-    title: options.title,
+    phase: "done",
+    filledEpisodes: plan.episodeCount,
+    units: plan.episodeCount,
     completedAt: new Date().toISOString(),
-  }, null, 2));
+  });
 
   return {
     projectId,
     baseDir,
     specPath: relPath(baseDir, "script-spec.md"),
     scriptPath: relPath(baseDir, "script.md"),
+    outlinePath,
+    draftPath,
   };
 }
 

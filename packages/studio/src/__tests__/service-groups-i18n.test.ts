@@ -34,4 +34,13 @@ describe("service quick links i18n", () => {
     expect(enLinks.map((l) => l.label)).toEqual(["Website", "API docs", "Models & pricing"]);
     expect(enLinks.map((l) => l.href)).toEqual(zhLinks.map((l) => l.href));
   });
+
+  it("modelscope quick links cover console and API docs", () => {
+    const zhLinks = getServiceQuickLinks("modelscope");
+    expect(zhLinks.map((l) => l.label)).toEqual(["控制台 / Token（配代理）", "API 文档"]);
+    expect(zhLinks.map((l) => l.href)).toEqual([
+      "https://www.modelscope.cn/my/myaccesstoken",
+      "https://www.modelscope.cn/docs/model-service/API-Inference/intro",
+    ]);
+  });
 });

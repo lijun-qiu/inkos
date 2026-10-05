@@ -33,8 +33,7 @@ import { setAppLanguage, tr } from "./lib/app-language";
 import { postApi, putApi, useApi } from "./hooks/use-api";
 import { Sun, Moon } from "lucide-react";
 import { House } from "lucide-react";
-import { LocalModelBar } from "./components/LocalModelBar";
-
+import { StudioModelPicker } from "./components/StudioModelPicker";
 export type { HashRoute as Route } from "./hooks/use-hash-route";
 
 export function deriveActiveBookId(route: HashRoute): string | undefined {
@@ -196,7 +195,8 @@ export function App() {
              </button>
           </div>
 
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-3 min-w-0">
+            <StudioModelPicker onManage={nav.toServices} />
             <div className="flex gap-0.5 bg-muted/50 rounded-lg p-0.5">
               <button
                 onClick={async () => {
@@ -226,7 +226,6 @@ export function App() {
             </button>
           </div>
           </div>
-          <LocalModelBar />
         </header>
 
         {/* Main Content Area */}

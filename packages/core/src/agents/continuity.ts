@@ -83,6 +83,7 @@ const DIMENSION_LABELS: Record<number, { readonly zh: string; readonly en: strin
   35: { zh: "世界规则遵守", en: "World Rule Compliance Check" },
   36: { zh: "关系动态", en: "Relationship Dynamics Check" },
   37: { zh: "正典事件一致性", en: "Canon Event Consistency Check" },
+  38: { zh: "指称数量一致性", en: "Referent Count Consistency Check" },
 };
 
 function containsChinese(text: string): boolean {
@@ -266,6 +267,10 @@ description 中要明确引用 hook_id，并把状态列中 stale / blocked 的�
       return language === "en"
         ? "Cross-check the chapter_memo provided with the chapter. Does the final prose deliver the memo's goal and leave a visible trace for every one of the 7 sections it contains (tasks, pay-offs / held-back cards, daily/transition function map, three-question check, end-of-chapter concrete changes, hard-don'ts)? Missing or contradicted sections -> critical. Note: a sparse memo (breather chapter, goal + skeleton body only) is legitimate — only flag drift against sections that the memo actually populates. Never flag the memo itself for being sparse."
         : "对照随章提供的 chapter_memo。成稿是否兑现了 memo 中的 goal，并在 7 段正文（当前任务 / 该兑现·暂不掀 / 日常过渡功能 / 关键抉择三连问 / 章尾必须发生的改变 / 不要做 等）中留下可见落地痕迹？任何段落缺失或被写反 → critical。提醒：稀疏 memo 合法（喘息章 memo 可以只有 goal + 骨架 body），只检查 memo 实际写出的段落，不能因为 memo 稀疏就判 incomplete。";
+    case 38:
+      return language === "en"
+        ? "Referent-count consistency (class check, not one-off phrases). When prose claims a count about a named term or listed names — e.g. 'N characters/words' (N字 / N个字), 'N people' (N人) — verify the claim matches the referent whether the count is adjacent, delayed (anaphora: quote first, N字 later), or anticipatory (cataphora: N字 first, quote reveals the term later). Classic fails: a three-character name with 'two characters'; '\"X……\" … carved those two characters deeper'; or 'those two characters exploded in his mind — \"Blood Priest\"'. Flag mismatches as critical when the referent is unambiguous. Do not invent issues for vague quantifiers with no clear local referent."
+        : "指称数量一致性（审这一类现象，不是审某一句固定措辞）。正文若用「N字 / N个字 / N人 / 把N字 / 这N个字」等数量指称去概括名称、称谓或名单，必须与实际字数/人数一致——包括紧邻、延后回指（先出现引号称谓，后文才写N字）、以及延前指称（先写N字，后文引号才亮出称谓）。典型失败：三字称谓写成「两字」；「“弑神者……”……把两字刻得更深」；「两字在识海炸开——「血祭司」」。指称对象明确时标 critical；没有明确邻近指称对象的模糊数量词不要硬判。";
     case 34:
     case 35:
     case 36:
@@ -332,6 +337,7 @@ function buildDimensionList(
   // Always-active dimensions
   activeIds.add(32); // 读者期待管理 — universal
   activeIds.add(33); // 章节备忘偏离 — universal (replaces legacy volume-outline drift)
+  activeIds.add(38); // 指称数量一致性 — universal (N字/N人 vs nearby referent)
 
   // Conditional overrides
   if (gp.eraResearch || bookRules?.eraConstraints?.enabled) {
@@ -468,7 +474,7 @@ export class ContinuityAuditor extends BaseAgent {
 
 You audit completion and structure only. Your job is to decide whether the chapter delivers the plan, keeps characters and timelines intact, and moves the book forward. Wording, sentence rhythm, paragraph shape, punctuation, imagery, and other prose-surface choices are NOT yours — those belong to the Polisher pass that runs after you. If you notice prose-surface issues, you may flag them with severity "info" so the Polisher can see them, but they do not count toward passed / overall_score and they must never be critical.
 
-You audit twelve structural reader-pain patterns: dragging / flat openings, blurry worldbuilding disconnected from reality, contradictory character setup, tangled POV, mainline drift or stagnation, weak conflict with missing payoff, pacing loss of control and abrupt transitions, character inconsistency across the arc, thin/one-note characters without contrast, stiff emotion expression and abrupt relationship jumps, imbalanced cheats/power gifts, and settings that never land in concrete action. Alongside these, keep the engineering dimensions listed below (OOC, timeline coherence, information boundary, hook debt, cross-chapter repetition, lexical fatigue, length band, title fatigue, paragraph shape).
+You audit twelve structural reader-pain patterns: dragging / flat openings, blurry worldbuilding disconnected from reality, contradictory character setup, tangled POV, mainline drift or stagnation, weak conflict with missing payoff, pacing loss of control and abrupt transitions, character inconsistency across the arc, thin/one-note characters without contrast, stiff emotion expression and abrupt relationship jumps, imbalanced cheats/power gifts, and settings that never land in concrete action. Alongside these, keep the engineering dimensions listed below (OOC, timeline coherence, information boundary, hook debt, cross-chapter repetition, lexical fatigue, length band, title fatigue, paragraph shape, referent-count consistency).
 
 Sparse chapter_memo is legitimate. Breather / aftermath / transition chapters may ship a memo that only contains goal + a skeleton body — do NOT flag such memos as incomplete, and do NOT penalise the chapter for lacking content against sections the memo itself does not populate. Judge drift only against what the memo actually says.
 
@@ -510,7 +516,7 @@ Score holistically — do not let a single minor issue tank the score.`
 
 你不审文笔、不审排版、不审句式——这些归 Polisher。你发现的文笔问题只能以 severity="info" 标注供 Polisher 参考，不计入 reviewer 的 passed/overall_score，也绝不可标为 critical。
 
-你审 12 条结构类雷点：开篇拖沓/平淡、世界观模糊脱现实、人设矛盾、视角杂乱、主线偏离/停滞、冲突乏力爽点缺失、节奏失控过渡生硬、人设前后矛盾、人物单薄无反差、情感表达生硬/关系突兀、金手指失衡、设定无落地。同时保留工程维度（OOC、timeline 一致、信息越界、hook-debt、跨章重复、词汇疲劳、章节字数、标题疲劳、段落形状）。
+你审 12 条结构类雷点：开篇拖沓/平淡、世界观模糊脱现实、人设矛盾、视角杂乱、主线偏离/停滞、冲突乏力爽点缺失、节奏失控过渡生硬、人设前后矛盾、人物单薄无反差、情感表达生硬/关系突兀、金手指失衡、设定无落地。同时保留工程维度（OOC、timeline 一致、信息越界、hook-debt、跨章重复、词汇疲劳、章节字数、标题疲劳、段落形状、指称数量一致性）。
 
 稀疏 memo 是合法状态。喘息章 / 后效章 / 过渡章的 memo 可以只有 goal + 骨架 body——此类 memo 不判 incomplete，也不能因为 memo 没写的段落就扣成稿的分。只按 memo 实际写出来的内容判偏离。
 
@@ -647,19 +653,73 @@ ${hooksBlock}${volumeSummariesBlock}${subplotBlock}${emotionalBlock}${matrixBloc
 ## 待审章节内容
 ${chapterContent}`;
 
-    const chatMessages = [
-      { role: "system" as const, content: systemPrompt },
-      { role: "user" as const, content: userPrompt },
-    ];
-    const chatOptions = { temperature: options?.temperature ?? 0.3 };
+    const retryFeedbackHeader = isEnglish
+      ? "## Error from previous output"
+      : "## 上次输出的错误";
+    const retryFeedbackTrailer = isEnglish
+      ? "Re-emit the audit result as a single valid JSON object only. No prose outside JSON."
+      : "请重新输出：只返回一个合法 JSON 对象，不要在 JSON 外写散文。";
 
-    // Use web search for fact verification when eraResearch is enabled
-    const response = gp.eraResearch
-      ? await this.chatWithSearch(chatMessages, chatOptions)
-      : await this.chat(chatMessages, chatOptions);
+    let currentUserPrompt = userPrompt;
+    let totalUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+    let lastResult: AuditResult | undefined;
 
-    const result = this.parseAuditResult(response.content, resolvedLanguage);
-    return { ...result, tokenUsage: response.usage };
+    // Free / reasoning models often return prose or think-blocks instead of JSON.
+    // Retry with parse feedback (same pattern as planner memo) before marking audit-failed.
+    const AUDIT_PARSE_RETRY_LIMIT = 3;
+    for (let attempt = 0; attempt < AUDIT_PARSE_RETRY_LIMIT; attempt += 1) {
+      const chatMessages = [
+        { role: "system" as const, content: systemPrompt },
+        { role: "user" as const, content: currentUserPrompt },
+      ];
+      const chatOptions = { temperature: options?.temperature ?? 0.3 };
+
+      // Use web search for fact verification when eraResearch is enabled
+      const response = gp.eraResearch
+        ? await this.chatWithSearch(chatMessages, chatOptions)
+        : await this.chat(chatMessages, chatOptions);
+
+      totalUsage = {
+        promptTokens: totalUsage.promptTokens + (response.usage?.promptTokens ?? 0),
+        completionTokens: totalUsage.completionTokens + (response.usage?.completionTokens ?? 0),
+        totalTokens: totalUsage.totalTokens + (response.usage?.totalTokens ?? 0),
+      };
+
+      const result = this.parseAuditResult(response.content, resolvedLanguage);
+      lastResult = result;
+      if (!result.parseFailed) {
+        return { ...result, tokenUsage: totalUsage };
+      }
+
+      this.log?.warn(
+        `[auditor] audit JSON parse failed (attempt ${attempt + 1}/${AUDIT_PARSE_RETRY_LIMIT})`,
+      );
+      currentUserPrompt = `${userPrompt}\n\n${retryFeedbackHeader}\n${result.summary}\n${retryFeedbackTrailer}`;
+    }
+
+    // Free models often never emit parseable JSON. Soft-pass so the chapter is not
+    // stuck at audit-failed after transport/write already succeeded; user can still
+    // review. Keep parseFailed so auto-revise does not invent fixes from bad audits.
+    const failed = lastResult!;
+    return {
+      passed: true,
+      parseFailed: true,
+      overallScore: failed.overallScore,
+      issues: [{
+        severity: "warning",
+        category: isEnglish ? "System" : "系统",
+        description: isEnglish
+          ? "Audit output could not be parsed as JSON after retries; treated as inconclusive (soft-pass)."
+          : "审稿输出多次无法解析为 JSON，已按存疑软通过（不阻塞章节）。",
+        suggestion: isEnglish
+          ? "Manually review the chapter, or re-run audit when the model is stable."
+          : "请人工抽查本章，或在模型稳定后再重跑审稿。",
+      }],
+      summary: isEnglish
+        ? "Audit parse failed after retries; soft-passed"
+        : "审稿解析多次失败，已软通过",
+      tokenUsage: totalUsage,
+    };
   }
 
   private parseAuditResult(content: string, language: PromptLanguage): AuditResult {

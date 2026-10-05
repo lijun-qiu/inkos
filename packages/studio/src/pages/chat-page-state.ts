@@ -43,6 +43,44 @@ export function setProjectChatSessionId(sessionId: string): void {
   globalThis.localStorage?.setItem(PROJECT_CHAT_SESSION_KEY, sessionId);
 }
 
+/**
+ * 模型选择器里/外统一带平台前缀，便于区分同名模型
+ *（如 modelscope/deepseek-v4-flash vs deepseek/deepseek-v4-flash）。
+ * 已含 `/` 的 id（OpenRouter org/model、魔搭前缀等）原样显示。
+ */
+export function formatModelDisplayId(service: string, modelId: string): string {
+  const id = modelId.trim();
+  if (!id) return id;
+  if (id.includes("/")) return id;
+  const svc = service.trim();
+  if (!svc || svc.startsWith("custom")) return id;
+  return `${svc}/${id}`;
+}
+
+/** 触发器文案：服务名 · 带平台前缀的模型 id */
+export function formatSelectedModelLabel(
+  serviceLabel: string | null | undefined,
+  service: string | null | undefined,
+  modelId: string,
+): string {
+  const displayId = formatModelDisplayId(service ?? "", modelId);
+  const label = serviceLabel?.trim();
+  return label ? `${label} · ${displayId}` : displayId;
+}
+
+function modelMatchesPreference(
+  model: ChatPageModelInfo,
+  preferredModel: string,
+  preferredService?: string,
+): boolean {
+  if (model.id === preferredModel) return true;
+  if (model.name === preferredModel) return true;
+  // 旧配置短名 deepseek-v4-flash → 银行 id deepseek/deepseek-v4-flash
+  if (model.id.endsWith(`/${preferredModel}`)) return true;
+  if (preferredService && model.id === `${preferredService}/${preferredModel}`) return true;
+  return false;
+}
+
 export function filterModelGroups(
   groupedModels: ReadonlyArray<ChatPageModelGroup>,
   search: string,
@@ -53,10 +91,13 @@ export function filterModelGroups(
   return groupedModels
     .map((group) => ({
       ...group,
-      models: group.models.filter((model) =>
-        (model.name ?? model.id).toLowerCase().includes(query)
-        || group.label.toLowerCase().includes(query),
-      ),
+      models: group.models.filter((model) => {
+        const displayId = formatModelDisplayId(group.service, model.name ?? model.id);
+        return displayId.toLowerCase().includes(query)
+          || (model.name ?? model.id).toLowerCase().includes(query)
+          || group.label.toLowerCase().includes(query)
+          || group.service.toLowerCase().includes(query);
+      }),
     }))
     .filter((group) => group.models.length > 0);
 }
@@ -79,21 +120,30 @@ export function pickModelSelection(
   const preferredModel = preference?.model?.trim();
   if (preferredService) {
     const preferredGroup = groupedModels.find((group) => group.service === preferredService);
+    // Preferred service is configured but its models are not loaded yet — wait.
+    // Do not fall through to another service that happens to share a short model id
+    // (e.g. deepseek-v4-flash on MyProxy vs modelscope/deepseek-v4-flash).
+    if (!preferredGroup) return null;
     const exactModel = preferredModel
-      ? preferredGroup?.models.find((model) => model.id === preferredModel)
+      ? preferredGroup.models.find((model) =>
+          modelMatchesPreference(model, preferredModel, preferredService),
+        )
       : undefined;
-    if (preferredGroup && exactModel) {
+    if (exactModel) {
       return { model: exactModel.id, service: preferredGroup.service };
     }
-    const firstPreferredModel = preferredGroup?.models[0];
-    if (preferredGroup && firstPreferredModel) {
+    const firstPreferredModel = preferredGroup.models[0];
+    if (firstPreferredModel) {
       return { model: firstPreferredModel.id, service: preferredGroup.service };
     }
+    return null;
   }
 
   if (preferredModel) {
     for (const group of groupedModels) {
-      const exactModel = group.models.find((model) => model.id === preferredModel);
+      const exactModel = group.models.find((model) =>
+        modelMatchesPreference(model, preferredModel, group.service),
+      );
       if (exactModel) return { model: exactModel.id, service: group.service };
     }
   }

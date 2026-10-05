@@ -1,5 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { loadSecrets, saveSecrets, getServiceApiKey } from "../llm/secrets.js";
+import {
+  loadSecrets,
+  saveSecrets,
+  getServiceApiKey,
+  upsertServiceSecret,
+} from "../llm/secrets.js";
 import { mkdtemp, rm, mkdir, writeFile, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -29,6 +34,23 @@ describe("secrets", () => {
       );
       const secrets = await loadSecrets(root);
       expect(secrets.services.moonshot.apiKey).toBe("sk-test");
+    });
+
+    it("strips legacy remaining fields from key pool entries", async () => {
+      await mkdir(join(root, ".inkos"), { recursive: true });
+      await writeFile(
+        join(root, ".inkos", "secrets.json"),
+        JSON.stringify({
+          services: {
+            modelscope: {
+              apiKey: "ms-a",
+              apiKeys: [{ key: "ms-a", remaining: 5, label: "A" }],
+            },
+          },
+        }),
+      );
+      const secrets = await loadSecrets(root);
+      expect(secrets.services.modelscope.apiKeys).toEqual([{ key: "ms-a", label: "A" }]);
     });
   });
 
@@ -90,6 +112,37 @@ describe("secrets", () => {
       );
       const key = await getServiceApiKey(root, "custom:内网GPT");
       expect(key).toBe("sk-custom");
+    });
+
+    it("returns manually selected pool key", async () => {
+      await saveSecrets(root, {
+        services: {
+          modelscope: {
+            apiKey: "ms-b",
+            apiKeys: [
+              { key: "ms-a", label: "A" },
+              { key: "ms-b", label: "B" },
+            ],
+          },
+        },
+      });
+      expect(await getServiceApiKey(root, "modelscope")).toBe("ms-b");
+    });
+  });
+
+  describe("key pool", () => {
+    it("preserves apiKeys when upserting only apiKey", async () => {
+      await upsertServiceSecret(root, "modelscope", {
+        apiKey: "ms-a",
+        apiKeys: [
+          { key: "ms-a" },
+          { key: "ms-b" },
+        ],
+      });
+      await upsertServiceSecret(root, "modelscope", { apiKey: "ms-b" });
+      const secrets = await loadSecrets(root);
+      expect(secrets.services.modelscope.apiKey).toBe("ms-b");
+      expect(secrets.services.modelscope.apiKeys).toHaveLength(2);
     });
   });
 });

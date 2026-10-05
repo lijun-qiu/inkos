@@ -11,7 +11,7 @@ const LLMServiceEntrySchema = z.object({
 });
 
 const LLMCoverConfigSchema = z.object({
-  service: z.enum(["kkaiapi", "openai", "google"]),
+  service: z.enum(["kkaiapi", "openai", "google", "agnes"]),
   model: z.string().min(1),
 }).optional();
 
@@ -94,7 +94,7 @@ export const FoundationConfigSchema = z.object({
 export type FoundationConfig = z.infer<typeof FoundationConfigSchema>;
 
 export const WritingConfigSchema = z.object({
-  reviewRetries: z.number().int().min(0).max(10).default(5),
+  reviewRetries: z.number().int().min(0).max(20).default(2),
   reviewMode: z.enum(["auto", "manual"]).default("auto"),
   revisionGate: z.enum(["strict", "lenient", "always"]).default("strict"),
 });
@@ -140,7 +140,7 @@ export const ProjectConfigSchema = z.object({
     reviewRetries: 2,
   }),
   writing: WritingConfigSchema.default({
-    reviewRetries: 5,
+    reviewRetries: 2,
   }),
   researchSearch: ResearchSearchConfigSchema,
   modelOverrides: z.record(z.string(), ModelOverrideValueSchema).optional(),

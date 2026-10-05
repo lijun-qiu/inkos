@@ -12,6 +12,10 @@ const PROVIDER_PRIORITY: readonly string[] = [
   "openrouter", "aihubmix", "novita",
 ];
 
+function isCustomServiceId(serviceId: string): boolean {
+  return serviceId === "custom" || serviceId.startsWith("custom:");
+}
+
 /**
  * 两层 lookup：
  * - Layer 1: 已知 provider 精确查（整串比较，不拆斜线）
@@ -20,22 +24,31 @@ const PROVIDER_PRIORITY: readonly string[] = [
  *
  * 不做斜线前缀拆分。lobe 的 processModelList 证实了"靠调用入口带 provider 消歧"
  * 是对的做法，斜线拆分对 PPIO / SiliconCloud 原生命名会误匹配。
+ *
+ * custom / custom:* 的 Layer 2 只按完整 model id 匹配，不吃其它厂商的
+ * deploymentName（例如网关短名 deepseek-v4-flash 不应继承官方卡的
+ * maxOutput=393216，部分中转会因此直接 400）。
  */
 export function lookupModel(
   serviceId: string,
   modelId: string,
 ): InkosModel | undefined {
   const lowerId = modelId.toLowerCase();
+  const customService = isCustomServiceId(serviceId);
 
-  const provider = getEndpoint(serviceId);
+  const matchCard = (m: InkosModel, allowDeploymentName: boolean): boolean =>
+    m.id.toLowerCase() === lowerId
+    || (allowDeploymentName && m.deploymentName?.toLowerCase() === lowerId);
+
+  const provider = getEndpoint(customService ? "custom" : serviceId);
   if (provider) {
-    const hit = provider.models.find((m) => m.id.toLowerCase() === lowerId);
+    const hit = provider.models.find((m) => matchCard(m, true));
     if (hit) return hit;
   }
 
   const matches: Array<{ model: InkosModel; providerId: string }> = [];
   for (const p of getAllEndpoints()) {
-    const hit = p.models.find((m) => m.id.toLowerCase() === lowerId);
+    const hit = p.models.find((m) => matchCard(m, !customService));
     if (hit) matches.push({ model: hit, providerId: p.id });
   }
   if (matches.length === 0) return undefined;

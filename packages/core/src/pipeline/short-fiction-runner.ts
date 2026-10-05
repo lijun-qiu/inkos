@@ -29,6 +29,7 @@ import {
   type ShortFictionSalesPackage,
 } from "../agents/short-fiction.js";
 import { coverSecretKey, resolveCoverProviderPreset, type CoverProviderPreset } from "../llm/cover-providers.js";
+import { fetchWithProxy } from "../utils/proxy-fetch.js";
 import { loadSecrets } from "../llm/secrets.js";
 import { safeChildPath } from "../utils/path-safety.js";
 import { toPosixPath as projectPath } from "../utils/posix-path.js";
@@ -150,7 +151,7 @@ async function produceShort(
     SHORT_FICTION_MIN_CHAPTERS,
     SHORT_FICTION_MAX_CHAPTERS,
   );
-  // charsPerChapter is the language's native unit: zh chars (900-1200) or en words (600-800).
+  // charsPerChapter is the language's native unit: zh chars (1800-2200) or en words (1200-1500).
   const charsPerChapter = language === "en"
     ? boundedInteger(
         options.charsPerChapter,
@@ -709,18 +710,13 @@ async function generateImagesCover(
   signal?: AbortSignal,
 ): Promise<{ readonly buffer: Buffer; readonly extension: "png" | "jpg" }> {
   const endpoint = request.endpoint ?? `${request.baseUrl.replace(/\/+$/u, "")}/images/generations`;
-  const response = await fetch(endpoint, {
+  const response = await fetchWithProxy(endpoint, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${request.apiKey}`,
     },
-    body: JSON.stringify({
-      model: request.model,
-      prompt,
-      n: 1,
-      size,
-    }),
+    body: JSON.stringify(buildImagesGenerationBody(request.model, prompt, size)),
     signal,
   });
   const text = await response.text();
@@ -746,6 +742,19 @@ async function generateImagesCover(
     return downloadGeneratedCoverImage(image.url, request.apiKey, signal);
   }
   throw new Error("cover generation response did not include image URL or base64 data.");
+}
+
+export function buildImagesGenerationBody(model: string, prompt: string, size: string): Record<string, unknown> {
+  const body: Record<string, unknown> = {
+    model,
+    prompt,
+    n: 1,
+    size,
+  };
+  if (model.startsWith("agnes-image-")) {
+    body.extra_body = { response_format: "url" };
+  }
+  return body;
 }
 
 export function extractImagesGenerationImage(payload: unknown): (

@@ -350,15 +350,15 @@ describe("ProjectConfigSchema", () => {
     expect(result.daemon.maxChaptersPerDay).toBe(50);
   });
 
-  it("defaults long-form writing review retries to one and accepts project overrides", () => {
+  it("defaults long-form writing review retries to two and accepts project overrides", async () => {
     const defaults = ProjectConfigSchema.parse(validProject);
-    expect(defaults.writing.reviewRetries).toBe(1);
+    expect(defaults.writing.reviewRetries).toBe(2);
 
     const overridden = ProjectConfigSchema.parse({
       ...validProject,
-      writing: { reviewRetries: 3 },
+      writing: { reviewRetries: 1 },
     });
-    expect(overridden.writing.reviewRetries).toBe(3);
+    expect(overridden.writing.reviewRetries).toBe(1);
   });
 
   it("keeps the long-form chapter review mode through config parsing", () => {

@@ -3,6 +3,7 @@ import {
   buildZhipuRateLimitModelRotation,
   isRateLimitLLMError,
   isTransientLLMHttpError,
+  isTransientLLMTransportError,
   ZHIPU_FREE_FLASH_ROTATION,
 } from "../llm/provider.js";
 
@@ -46,6 +47,29 @@ describe("isTransientLLMHttpError", () => {
     expect(
       isTransientLLMHttpError(new Error('{"code":500,"reason":"MODEL_NOT_AVAILABLE","message":"model not available"}')),
     ).toBe(false);
+  });
+});
+
+describe("isTransientLLMTransportError", () => {
+  it("retries connect / fetch failures that wrapLLMError maps to 无法连接", () => {
+    expect(isTransientLLMTransportError(new Error("fetch failed"))).toBe(true);
+    expect(isTransientLLMTransportError(new Error("Connection error"))).toBe(true);
+    expect(isTransientLLMTransportError(new Error("connect ECONNREFUSED 127.0.0.1:7890"))).toBe(true);
+    expect(isTransientLLMTransportError(new Error("getaddrinfo ENOTFOUND openrouter.ai"))).toBe(true);
+    expect(isTransientLLMTransportError(new Error("ConnectTimeoutError: Connect Timeout Error"))).toBe(true);
+    expect(isTransientLLMTransportError(new Error("socket hang up"))).toBe(true);
+  });
+
+  it("matches nested causes and wrapped Chinese connect errors", () => {
+    const err = new Error("request failed") as Error & { cause?: unknown };
+    err.cause = new Error("UND_ERR_SOCKET");
+    expect(isTransientLLMTransportError(err)).toBe(true);
+    expect(isTransientLLMTransportError(new Error("无法连接到 API 服务。可能原因："))).toBe(true);
+  });
+
+  it("does NOT treat auth / bad-request as transport", () => {
+    expect(isTransientLLMTransportError(new Error("401 Unauthorized"))).toBe(false);
+    expect(isTransientLLMTransportError(new Error("400 Bad Request"))).toBe(false);
   });
 });
 

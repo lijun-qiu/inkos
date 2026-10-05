@@ -150,6 +150,16 @@ async function applyContextBudgetIfNeeded(params: {
   }
 
   const availableInputTokens = budget.contextWindowTokens - Math.max(0, budget.reservedOutputTokens);
+  // Some provider cards list maxOutput larger than contextWindow (e.g. ModelScope
+  // DeepSeek V4 Flash). That makes available input negative; skip local budget
+  // gating and let the upstream request proceed.
+  if (availableInputTokens <= 0) {
+    return {
+      contextPackage: params.contextPackage,
+      notes: ["context-budget-skipped-nonpositive-input"],
+    };
+  }
+
   const selectedContext = params.contextPackage.selectedContext;
   const totalTokens = estimateSelectedContextTokens(selectedContext);
   if (totalTokens <= availableInputTokens) {

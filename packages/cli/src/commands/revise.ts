@@ -15,6 +15,9 @@ export const reviseCommand = new Command("revise")
   .argument("[book-id]", "Book ID (auto-detected if only one book)")
   .argument("[chapter]", "Chapter number (defaults to latest)")
   .option("--mode <mode>", "Revise mode: spot-fix, polish, rewrite, rework, anti-detect", DEFAULT_REVISE_MODE)
+  .option("--fix-info", "Revise against info findings only (prose-surface notes)")
+  .option("--fix-warnings", "Revise against warning findings only")
+  .option("--include-info", "Deprecated alias of --fix-info")
   .option("--brief <text>", "One-off creative guidance for this revise/rewrite only")
   .option("--json", "Output JSON")
   .option("--notify", "Send a notification to configured notify channels when the command finishes")
@@ -46,9 +49,25 @@ export const reviseCommand = new Command("revise")
       }));
 
       const mode = opts.mode as ReviseMode;
-      if (!opts.json) log(`Revising "${bookId}"${chapterNumber ? ` chapter ${chapterNumber}` : " (latest)"} [mode: ${mode}]...`);
+      const issueScope = opts.fixWarnings
+        ? "warning" as const
+        : (opts.fixInfo || opts.includeInfo)
+          ? "info" as const
+          : "default" as const;
+      if (!opts.json) {
+        const scopeLabel = issueScope === "info"
+          ? ", fix-info"
+          : issueScope === "warning"
+            ? ", fix-warnings"
+            : "";
+        log(
+          `Revising "${bookId}"${chapterNumber ? ` chapter ${chapterNumber}` : " (latest)"} [mode: ${mode}${scopeLabel}]...`,
+        );
+      }
 
-      const result = await pipeline.reviseDraft(bookId, chapterNumber, mode);
+      const result = await pipeline.reviseDraft(bookId, chapterNumber, mode, undefined, {
+        issueScope,
+      });
 
       if (opts.json) {
         log(JSON.stringify(result, null, 2));

@@ -44,6 +44,148 @@ describe("ContinuityAuditor", () => {
     ]);
   });
 
+  it("retries audit chat when the first response is not parseable JSON", async () => {
+    const root = await mkdtemp(join(tmpdir(), "inkos-auditor-parse-retry-"));
+    const bookDir = join(root, "book");
+    const storyDir = join(bookDir, "story");
+    await mkdir(storyDir, { recursive: true });
+    await Promise.all([
+      writeFile(
+        join(bookDir, "book.json"),
+        JSON.stringify({
+          id: "retry-book",
+          title: "Retry Book",
+          genre: "other",
+          platform: "qidian",
+          chapterWordCount: 800,
+          targetChapters: 60,
+          status: "active",
+          language: "zh",
+          createdAt: "2026-03-23T00:00:00.000Z",
+          updatedAt: "2026-03-23T00:00:00.000Z",
+        }, null, 2),
+        "utf-8",
+      ),
+      writeFile(join(storyDir, "current_state.md"), "# Current State\n", "utf-8"),
+      writeFile(join(storyDir, "pending_hooks.md"), "# Pending Hooks\n", "utf-8"),
+      writeFile(join(storyDir, "chapter_summaries.md"), "# Chapter Summaries\n", "utf-8"),
+      writeFile(join(storyDir, "subplot_board.md"), "# Subplot Board\n", "utf-8"),
+      writeFile(join(storyDir, "emotional_arcs.md"), "# Emotional Arcs\n", "utf-8"),
+      writeFile(join(storyDir, "character_matrix.md"), "# Character Matrix\n", "utf-8"),
+      writeFile(join(storyDir, "volume_outline.md"), "# Volume Outline\n", "utf-8"),
+      writeFile(join(storyDir, "style_guide.md"), "# Style Guide\n", "utf-8"),
+    ]);
+
+    const auditor = new ContinuityAuditor({
+      client: {
+        provider: "openai",
+        apiFormat: "chat",
+        stream: false,
+        defaults: {
+          temperature: 0.7,
+          maxTokens: 4096,
+          thinkingBudget: 0,
+          extra: {},
+        },
+      },
+      model: "test-model",
+      projectRoot: root,
+    });
+
+    const chatSpy = vi.spyOn(ContinuityAuditor.prototype as never, "chat" as never)
+      .mockResolvedValueOnce({
+        content: "这不是 JSON，只是一段废话。",
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+      })
+      .mockResolvedValueOnce({
+        content: JSON.stringify({
+          passed: true,
+          overall_score: 88,
+          issues: [],
+          summary: "ok after retry",
+        }),
+        usage: { promptTokens: 2, completionTokens: 2, totalTokens: 4 },
+      });
+
+    try {
+      const result = await auditor.auditChapter(bookDir, "Chapter body.", 1, "other");
+      expect(chatSpy).toHaveBeenCalledTimes(2);
+      expect(result.parseFailed).toBeFalsy();
+      expect(result.passed).toBe(true);
+      expect(result.summary).toBe("ok after retry");
+      expect(result.tokenUsage?.totalTokens).toBe(6);
+      const secondUser = (chatSpy.mock.calls[1]?.[0] as ReadonlyArray<{ content: string }>)?.[1]?.content ?? "";
+      expect(secondUser).toContain("上次输出的错误");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("soft-passes after audit JSON parse retries are exhausted", async () => {
+    const root = await mkdtemp(join(tmpdir(), "inkos-auditor-soft-pass-"));
+    const bookDir = join(root, "book");
+    const storyDir = join(bookDir, "story");
+    await mkdir(storyDir, { recursive: true });
+    await Promise.all([
+      writeFile(
+        join(bookDir, "book.json"),
+        JSON.stringify({
+          id: "soft-pass-book",
+          title: "Soft Pass Book",
+          genre: "other",
+          platform: "qidian",
+          chapterWordCount: 800,
+          targetChapters: 60,
+          status: "active",
+          language: "zh",
+          createdAt: "2026-03-23T00:00:00.000Z",
+          updatedAt: "2026-03-23T00:00:00.000Z",
+        }, null, 2),
+        "utf-8",
+      ),
+      writeFile(join(storyDir, "current_state.md"), "# Current State\n", "utf-8"),
+      writeFile(join(storyDir, "pending_hooks.md"), "# Pending Hooks\n", "utf-8"),
+      writeFile(join(storyDir, "chapter_summaries.md"), "# Chapter Summaries\n", "utf-8"),
+      writeFile(join(storyDir, "subplot_board.md"), "# Subplot Board\n", "utf-8"),
+      writeFile(join(storyDir, "emotional_arcs.md"), "# Emotional Arcs\n", "utf-8"),
+      writeFile(join(storyDir, "character_matrix.md"), "# Character Matrix\n", "utf-8"),
+      writeFile(join(storyDir, "volume_outline.md"), "# Volume Outline\n", "utf-8"),
+      writeFile(join(storyDir, "style_guide.md"), "# Style Guide\n", "utf-8"),
+    ]);
+
+    const auditor = new ContinuityAuditor({
+      client: {
+        provider: "openai",
+        apiFormat: "chat",
+        stream: false,
+        defaults: {
+          temperature: 0.7,
+          maxTokens: 4096,
+          thinkingBudget: 0,
+          extra: {},
+        },
+      },
+      model: "test-model",
+      projectRoot: root,
+    });
+
+    const chatSpy = vi.spyOn(ContinuityAuditor.prototype as never, "chat" as never).mockResolvedValue({
+      content: "仍然不是 JSON",
+      usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+    });
+
+    try {
+      const result = await auditor.auditChapter(bookDir, "Chapter body.", 1, "other");
+      expect(chatSpy).toHaveBeenCalledTimes(3);
+      expect(result.parseFailed).toBe(true);
+      expect(result.passed).toBe(true);
+      expect(result.issues[0]?.severity).toBe("warning");
+      expect(result.summary).toContain("软通过");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("parses typed repair_scope from audit JSON", () => {
     const auditor = new ContinuityAuditor({
       client: {
@@ -443,6 +585,7 @@ describe("ContinuityAuditor", () => {
       expect(systemPrompt).toContain("你不审文笔");
       expect(systemPrompt).toContain("稀疏 memo 是合法状态");
       expect(systemPrompt).toContain("章节备忘偏离");
+      expect(systemPrompt).toContain("指称数量一致性");
       expect(systemPrompt).not.toContain("大纲偏离检测");
 
       // User prompt injects the memo for drift-checking.

@@ -106,4 +106,10 @@ describe("listModelsForService (B8)", () => {
     const models = await listModelsForService("nonexistent-xyz");
     expect(models).toEqual([]);
   });
+
+  it("agnes 银行列表包含 agnes-3.0-flash 且排在最前", async () => {
+    const models = await listModelsForService("agnes");
+    expect(models.map((m) => m.id)[0]).toBe("agnes-3.0-flash");
+    expect(models.some((m) => m.id === "agnes-2.5-flash")).toBe(true);
+  });
 });

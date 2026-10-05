@@ -231,7 +231,8 @@ export function Dashboard({ nav, sse, theme, t }: { nav: Nav; sse: { messages: R
                     </div>
                     <button
                       onClick={() => nav.toBook(book.id)}
-                      className="font-serif text-2xl hover:text-primary transition-all text-left truncate block font-medium hover:underline underline-offset-4 decoration-primary/30"
+                      title={book.title}
+                      className="font-serif text-2xl hover:text-primary transition-all text-left break-words whitespace-normal block font-medium hover:underline underline-offset-4 decoration-primary/30"
                     >
                       {book.title}
                     </button>

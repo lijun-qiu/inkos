@@ -1,0 +1,105 @@
+{
+  "name": "my-novel",
+  "version": "0.1.0",
+  "language": "zh",
+  "llm": {
+    "provider": "custom",
+    "configSource": "studio",
+    "baseUrl": "https://ai.miaofei.vip/v1",
+    "model": "deepseek-v4-flash",
+    "apiFormat": "chat",
+    "stream": true,
+    "services": [
+      {
+        "service": "openrouter",
+        "baseUrl": "http://127.0.0.1:9999",
+        "temperature": 0.7,
+        "apiFormat": "chat",
+        "stream": true
+      },
+      {
+        "service": "deepseek",
+        "temperature": 1.5,
+        "apiFormat": "chat",
+        "stream": true
+      },
+      {
+        "service": "zhipu",
+        "temperature": 0.7,
+        "apiFormat": "chat",
+        "stream": true
+      },
+      {
+        "service": "google",
+        "temperature": 1,
+        "apiFormat": "chat",
+        "stream": true
+      },
+      {
+        "service": "custom",
+        "name": "Agnes",
+        "baseUrl": "https://apihub.agnes-ai.com/v1",
+        "temperature": 0.7,
+        "apiFormat": "chat",
+        "stream": true
+      },
+      {
+        "service": "ollama",
+        "temperature": 0.7,
+        "apiFormat": "chat",
+        "stream": true
+      },
+      {
+        "service": "custom",
+        "name": "MyProxy",
+        "baseUrl": "https://ai.miaofei.vip/v1",
+        "apiFormat": "chat",
+        "stream": true
+      }
+    ],
+    "temperature": 0.7,
+    "defaultModel": "deepseek-v4-flash",
+    "service": "custom:MyProxy",
+    "cover": {
+      "service": "kkaiapi",
+      "model": "gpt-image-2"
+    }
+  },
+  "notify": [],
+  "inputGovernanceMode": "v2",
+  "detection": {
+    "enabled": true,
+    "provider": "custom",
+    "apiUrl": "http://127.0.0.1:8791/detect",
+    "apiKeyEnv": "INKOS_DETECT_API_KEY",
+    "threshold": 0.7,
+    "autoRewrite": false,
+    "maxRetries": 3
+  },
+  "modelOverrides": {
+    "writer": "nvidia/nemotron-3-ultra-550b-a55b:free",
+    "reviser": "nvidia/nemotron-3-ultra-550b-a55b:free",
+    "composer": "nvidia/nemotron-3-ultra-550b-a55b:free",
+    "length-normalizer": "nvidia/nemotron-3-ultra-550b-a55b:free",
+    "planner": "nvidia/nemotron-3-ultra-550b-a55b:free",
+    "architect": "nvidia/nemotron-3-ultra-550b-a55b:free",
+    "auditor": "nvidia/nemotron-3-ultra-550b-a55b:free",
+    "state-validator": "nvidia/nemotron-3-ultra-550b-a55b:free",
+    "chapter-analyzer": "nvidia/nemotron-3-ultra-550b-a55b:free",
+    "foundation-reviewer": "nvidia/nemotron-3-ultra-550b-a55b:free",
+    "radar": "nvidia/nemotron-3-ultra-550b-a55b:free",
+    "settler": "nvidia/nemotron-3-ultra-550b-a55b:free"
+  },
+  "daemon": {
+    "schedule": {
+      "radarCron": "0 */6 * * *",
+      "writeCron": "*/15 * * * *"
+    },
+    "maxConcurrentBooks": 3
+  },
+  "writing": {
+    "reviewMode": "auto",
+    "reviewRetries": 10,
+    "revisionGate": "lenient"
+  }
+}

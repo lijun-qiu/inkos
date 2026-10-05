@@ -31,7 +31,7 @@ import type { RadarResult } from "../agents/radar.js";
 import type { LengthSpec, LengthTelemetry } from "../models/length-governance.js";
 import type { ChapterMemo, ContextPackage, RuleStack } from "../models/input-governance.js";
 import type { ContextCompressionCallback } from "../models/context-compression.js";
-import { buildLengthSpec, countChapterLength, formatLengthCount, isOutsideHardRange, resolveLengthCountingMode, type LengthLanguage } from "../utils/length-metrics.js";
+import { buildLengthSpec, countChapterLength, formatLengthCount, isOutsideHardRange, isOutsideSoftRange, resolveLengthCountingMode, type LengthLanguage } from "../utils/length-metrics.js";
 import { analyzeLongSpanFatigue } from "../utils/long-span-fatigue.js";
 import { buildWritingMethodologySection } from "../utils/writing-methodology.js";
 import {
@@ -43,7 +43,8 @@ import {
 import { loadNarrativeMemorySeed, loadSnapshotCurrentStateFacts } from "../state/runtime-state-store.js";
 import { rewriteStructuredStateFromMarkdown } from "../state/state-bootstrap.js";
 import { readFileSync } from "node:fs";
-import { readFile, readdir, writeFile, mkdir, rename, rm, stat } from "node:fs/promises";
+import { readFile, readdir, writeFile, mkdir, rm, stat } from "node:fs/promises";
+import { renameDirectoryReliable } from "../utils/rename-dir.js";
 import { join } from "node:path";
 import {
   parseStateDegradedReviewNote,
@@ -444,7 +445,82 @@ interface MergedAuditEvaluation {
   readonly aiTellCount: number;
   readonly blockingCount: number;
   readonly criticalCount: number;
+  readonly warningCount: number;
+  readonly infoCount: number;
   readonly revisionBlockingIssues: ReadonlyArray<AuditIssue>;
+}
+
+/** Which audit severities a manual revise pass should target. */
+export type ReviseIssueScope = "default" | "info" | "warning";
+
+export interface ReviseDraftOptions {
+  /**
+   * Target issue severities for this revise pass.
+   * - default: warning / critical / AI-tell (info alone is skipped)
+   * - info: only info findings (prose-surface notes)
+   * - warning: only warning findings (not critical)
+   */
+  readonly issueScope?: ReviseIssueScope;
+  /**
+   * @deprecated Use `issueScope: "info"`. Previously revised info+warning+critical together.
+   */
+  readonly includeInfoIssues?: boolean;
+}
+
+function resolveReviseIssueScope(options?: ReviseDraftOptions): ReviseIssueScope {
+  if (options?.issueScope === "info" || options?.issueScope === "warning" || options?.issueScope === "default") {
+    return options.issueScope;
+  }
+  // Legacy flag mapped to info-only (split from the old combined info+warning pass).
+  if (options?.includeInfoIssues === true) return "info";
+  return "default";
+}
+
+/** Full-chapter revise modes the user launches intentionally — do not skip when live audit is soft. */
+const ISSUE_OPTIONAL_REVISE_MODES: ReadonlySet<ReviseMode> = new Set([
+  "polish",
+  "rewrite",
+  "rework",
+  "anti-detect",
+]);
+
+function mapPostWriteViolationsToAuditIssues(
+  violations: ReadonlyArray<{
+    readonly rule: string;
+    readonly severity: "error" | "warning";
+    readonly description: string;
+    readonly suggestion: string;
+  }>,
+): ReadonlyArray<AuditIssue> {
+  return violations.map((violation) => ({
+    severity: violation.severity === "error" ? "critical" as const : "warning" as const,
+    category: violation.rule,
+    description: violation.description,
+    suggestion: violation.suggestion,
+    repairScope: "local" as const,
+  }));
+}
+
+function buildSoftLengthAuditIssues(
+  wordCount: number,
+  lengthSpec: LengthSpec,
+): ReadonlyArray<AuditIssue> {
+  if (!isOutsideSoftRange(wordCount, lengthSpec)) return [];
+  return [{
+    severity: "warning",
+    category: "length",
+    description: lengthSpec.countingMode === "en_words"
+      ? `Chapter length ${wordCount} is outside soft range ${lengthSpec.softMin}-${lengthSpec.softMax} (target ${lengthSpec.target})`
+      : `章节字数 ${wordCount} 超出软区间 ${lengthSpec.softMin}-${lengthSpec.softMax}（目标 ${lengthSpec.target}）`,
+    suggestion: wordCount > lengthSpec.softMax
+      ? (lengthSpec.countingMode === "en_words"
+        ? `Compress toward ~${lengthSpec.target} words; cut filler dialogue/repeated interiority; keep plot and hooks`
+        : `压缩到约 ${lengthSpec.target} 字，删注水对话/重复心理，保留情节与钩子`)
+      : (lengthSpec.countingMode === "en_words"
+        ? `Expand toward ~${lengthSpec.target} words with concrete scenes/action, not empty lyricism`
+        : `扩写到约 ${lengthSpec.target} 字，补足场面与动作，不要空抒情`),
+    repairScope: "local",
+  }];
 }
 
 export interface ImportChaptersInput {
@@ -756,6 +832,7 @@ export class PipelineRunner {
         thinkingBudget: sameEndpoint ? (base?.thinkingBudget ?? 0) : 0,
         apiFormat,
         stream,
+        projectRoot: this.config.projectRoot,
         ...(proxyUrl ? { proxyUrl } : {}),
       });
       this.agentClients.set(cacheKey, client);
@@ -896,7 +973,7 @@ export class PipelineRunner {
         await rm(bookDir, { recursive: true, force: true });
       }
 
-      await rename(stagingBookDir, bookDir);
+      await renameDirectoryReliable(stagingBookDir, bookDir);
     } catch (error) {
       await rm(stagingBookDir, { recursive: true, force: true }).catch(() => undefined);
       throw error;
@@ -1386,6 +1463,13 @@ export class PipelineRunner {
     const auditor = new ContinuityAuditor(this.agentCtxFor("auditor", bookId));
     const { profile: gp } = await this.loadGenreProfile(book.genre);
     const language = book.language ?? gp.language;
+    const indexForLength = await this.state.loadChapterIndex(bookId);
+    const chapterMetaForLength = indexForLength.find((ch) => ch.number === targetChapter);
+    const chapterLengthTarget = chapterMetaForLength?.lengthTelemetry?.target ?? book.chapterWordCount;
+    const lengthLanguage = chapterMetaForLength?.lengthTelemetry?.countingMode === "en_words"
+      ? "en"
+      : language;
+    const lengthSpec = buildLengthSpec(chapterLengthTarget, lengthLanguage);
     this.logStage(language, {
       zh: `审计第${targetChapter}章`,
       en: `auditing chapter ${targetChapter}`,
@@ -1397,6 +1481,8 @@ export class PipelineRunner {
       chapterContent: content,
       chapterNumber: targetChapter,
       language,
+      lengthSpec,
+      genreProfile: gp,
     });
     const result = evaluation.auditResult;
 
@@ -1434,9 +1520,16 @@ export class PipelineRunner {
   }
 
   /** Revise the latest (or specified) chapter based on audit issues. */
-  async reviseDraft(bookId: string, chapterNumber?: number, mode: ReviseMode = DEFAULT_REVISE_MODE, externalContext?: string): Promise<ReviseResult> {
+  async reviseDraft(
+    bookId: string,
+    chapterNumber?: number,
+    mode: ReviseMode = DEFAULT_REVISE_MODE,
+    externalContext?: string,
+    options?: ReviseDraftOptions,
+  ): Promise<ReviseResult> {
     const releaseLock = await this.state.acquireBookLock(bookId);
     try {
+      const issueScope = resolveReviseIssueScope(options);
       const book = await this.state.loadBookConfig(bookId);
       const bookDir = this.state.bookDir(bookId);
       const targetChapter = chapterNumber ?? (await this.state.getNextChapterNumber(bookId)) - 1;
@@ -1456,12 +1549,22 @@ export class PipelineRunner {
         throw new Error(`Chapter ${targetChapter} not found in index`);
       }
 
-      // Re-audit to get structured issues (index only stores strings)
+      // Re-audit to get structured issues (index only stores strings).
+      // Include the same deterministic checks as the write-time review cycle
+      // (post-write shape + soft length) so manual 精修/打磨 see the issues the UI listed.
       const content = await this.readChapterContent(bookDir, targetChapter);
       const auditor = new ContinuityAuditor(this.agentCtxFor("auditor", bookId));
       const { profile: gp } = await this.loadGenreProfile(book.genre);
       const language = book.language ?? gp.language;
       const countingMode = resolveLengthCountingMode(language);
+      const chapterLengthTarget = chapterMeta.lengthTelemetry?.target ?? book.chapterWordCount;
+      const lengthLanguage = chapterMeta.lengthTelemetry?.countingMode === "en_words"
+        ? "en"
+        : language;
+      const lengthSpec = buildLengthSpec(
+        chapterLengthTarget,
+        lengthLanguage,
+      );
       const effectiveExternalContext = externalContext ?? this.config.externalContext;
       const reviseControlInput = (this.config.inputGovernanceMode ?? "v2") === "legacy"
         ? undefined
@@ -1479,6 +1582,8 @@ export class PipelineRunner {
         chapterContent: content,
         chapterNumber: targetChapter,
         language,
+        lengthSpec,
+        genreProfile: gp,
         auditOptions: reviseControlInput
           ? {
               chapterIntent: reviseControlInput.plan.intentMarkdown,
@@ -1489,25 +1594,34 @@ export class PipelineRunner {
           : undefined,
       });
 
-      if (preRevision.blockingCount === 0 && preRevision.aiTellCount === 0) {
+      const issueOptionalMode = ISSUE_OPTIONAL_REVISE_MODES.has(mode);
+      const hasActionableIssues = issueScope === "info"
+        ? preRevision.infoCount > 0
+        : issueScope === "warning"
+          ? preRevision.warningCount > 0
+          : (preRevision.blockingCount > 0 || preRevision.aiTellCount > 0);
+      if (!hasActionableIssues && !issueOptionalMode) {
         return {
           chapterNumber: targetChapter,
           wordCount: countChapterLength(content, countingMode),
           fixedIssues: [],
           applied: false,
           status: "unchanged",
-          skippedReason: "No warning, critical, or AI-tell issues to fix.",
+          skippedReason: issueScope === "info"
+            ? "No info issues to fix."
+            : issueScope === "warning"
+              ? "No warning issues to fix."
+              : "No warning, critical, or AI-tell issues to fix.",
         };
       }
 
-      const chapterLengthTarget = chapterMeta.lengthTelemetry?.target ?? book.chapterWordCount;
-      const lengthLanguage = chapterMeta.lengthTelemetry?.countingMode === "en_words"
-        ? "en"
-        : language;
-      const lengthSpec = buildLengthSpec(
-        chapterLengthTarget,
-        lengthLanguage,
-      );
+      // Scope filters which findings the reviser is asked to touch this pass.
+      // Issue-optional modes (polish/rewrite/…) may run with an empty issue list.
+      const issuesForReviser = issueScope === "info"
+        ? preRevision.revisionBlockingIssues.filter((issue) => issue.severity === "info")
+        : issueScope === "warning"
+          ? preRevision.revisionBlockingIssues.filter((issue) => issue.severity === "warning")
+          : preRevision.auditResult.issues;
 
       const reviser = new ReviserAgent(this.agentCtxFor("reviser", bookId));
       this.logStage(stageLanguage, {
@@ -1518,7 +1632,7 @@ export class PipelineRunner {
         bookDir,
         content,
         targetChapter,
-        preRevision.auditResult.issues,
+        issuesForReviser,
         mode,
         book.genre,
         reviseControlInput
@@ -1549,6 +1663,8 @@ export class PipelineRunner {
         chapterContent: normalizedRevision.content,
         chapterNumber: targetChapter,
         language,
+        lengthSpec,
+        genreProfile: gp,
         auditOptions: reviseControlInput
           ? {
               temperature: 0,
@@ -1593,20 +1709,40 @@ export class PipelineRunner {
 
       const improvedBlocking = effectivePostRevision.blockingCount < preRevision.blockingCount;
       const improvedAITells = effectivePostRevision.aiTellCount < preRevision.aiTellCount;
+      const improvedInfo = effectivePostRevision.infoCount < preRevision.infoCount;
+      const improvedWarning = effectivePostRevision.warningCount < preRevision.warningCount;
       const blockingDidNotWorsen = effectivePostRevision.blockingCount <= preRevision.blockingCount;
       const criticalDidNotWorsen = effectivePostRevision.criticalCount <= preRevision.criticalCount;
       const aiDidNotWorsen = effectivePostRevision.aiTellCount <= preRevision.aiTellCount;
-      const didNotWorsen = blockingDidNotWorsen && criticalDidNotWorsen && aiDidNotWorsen;
+      const infoDidNotWorsen = effectivePostRevision.infoCount <= preRevision.infoCount;
+      const warningDidNotWorsen = effectivePostRevision.warningCount <= preRevision.warningCount;
+      // Scoped passes still refuse if critical/blocking worsen as a side effect.
+      const didNotWorsen = issueScope === "info"
+        ? infoDidNotWorsen && criticalDidNotWorsen && blockingDidNotWorsen
+        : issueScope === "warning"
+          ? warningDidNotWorsen && criticalDidNotWorsen
+          : (blockingDidNotWorsen && criticalDidNotWorsen && aiDidNotWorsen);
       const revisionGate = this.config.revisionGate ?? "strict";
       const shouldApplyRevision = revisionGate === "always"
         ? true
         : revisionGate === "lenient"
           ? didNotWorsen
-          : didNotWorsen && (improvedBlocking || improvedAITells);
+          : didNotWorsen && (
+            issueScope === "info"
+              ? improvedInfo
+              : issueScope === "warning"
+                ? improvedWarning
+                : (improvedBlocking || improvedAITells)
+          );
 
       if (!shouldApplyRevision) {
         const remainingIssues = effectivePostRevision.revisionBlockingIssues
-          .filter((issue) => issue.severity === "warning" || issue.severity === "critical")
+          .filter((issue) =>
+            issueScope === "info"
+              ? issue.severity === "info"
+              : issueScope === "warning"
+                ? issue.severity === "warning"
+                : (issue.severity === "warning" || issue.severity === "critical"))
           .slice(0, 6)
           .map((issue) => ({
             severity: issue.severity,
@@ -1620,7 +1756,7 @@ export class PipelineRunner {
           fixedIssues: [],
           applied: false,
           status: "unchanged",
-          skippedReason: `Manual revision kept original chapter: before blocking=${preRevision.blockingCount}, critical=${preRevision.criticalCount}, aiTell=${preRevision.aiTellCount}; after blocking=${effectivePostRevision.blockingCount}, critical=${effectivePostRevision.criticalCount}, aiTell=${effectivePostRevision.aiTellCount}.`,
+          skippedReason: `Manual revision kept original chapter: before blocking=${preRevision.blockingCount}, critical=${preRevision.criticalCount}, warning=${preRevision.warningCount}, aiTell=${preRevision.aiTellCount}, info=${preRevision.infoCount}; after blocking=${effectivePostRevision.blockingCount}, critical=${effectivePostRevision.criticalCount}, warning=${effectivePostRevision.warningCount}, aiTell=${effectivePostRevision.aiTellCount}, info=${effectivePostRevision.infoCount}.`,
           revisionDiagnostics: {
             standard: REVISION_GATE_STANDARDS[revisionGate],
             before: {
@@ -3211,7 +3347,9 @@ ${matrix}`,
       params.chapterContent,
       params.lengthSpec.countingMode,
     );
-    if (!isOutsideHardRange(writerCount, params.lengthSpec)) {
+    // Soft band (not only hard): chapters often land between softMax and hardMax
+    // (e.g. 3677 with softMax 3409 / hardMax 3818) and used to skip compress entirely.
+    if (!isOutsideSoftRange(writerCount, params.lengthSpec)) {
       return {
         content: params.chapterContent,
         wordCount: writerCount,
@@ -3222,36 +3360,60 @@ ${matrix}`,
     const normalizer = new LengthNormalizerAgent(
       this.agentCtxFor("length-normalizer", params.bookId),
     );
-    const normalized = await normalizer.normalizeChapter({
-      chapterContent: params.chapterContent,
-      lengthSpec: params.lengthSpec,
-      chapterIntent: params.chapterIntent,
-    });
+    let content = params.chapterContent;
+    let finalCount = writerCount;
+    let applied = false;
+    let tokenUsage: TokenUsageSummary | undefined;
+    // Up to 2 compress/expand passes when still outside soft after the first.
+    const maxPasses = 2;
+    for (let pass = 0; pass < maxPasses; pass += 1) {
+      const before = countChapterLength(content, params.lengthSpec.countingMode);
+      if (!isOutsideSoftRange(before, params.lengthSpec)) break;
 
-    // Safety net: if normalizer output is less than 25% of original, it was too destructive.
-    // Reject and keep original content.
-    if (normalized.finalCount < writerCount * 0.25) {
-      this.logWarn(this.languageFromLengthSpec(params.lengthSpec), {
-        zh: `字数归一化被拒绝：第${params.chapterNumber}章 ${writerCount} -> ${normalized.finalCount}（砍了${Math.round((1 - normalized.finalCount / writerCount) * 100)}%，超过安全阈值）`,
-        en: `Length normalization rejected for chapter ${params.chapterNumber}: ${writerCount} -> ${normalized.finalCount} (cut ${Math.round((1 - normalized.finalCount / writerCount) * 100)}%, exceeds safety threshold)`,
+      const normalized = await normalizer.normalizeChapter({
+        chapterContent: content,
+        lengthSpec: params.lengthSpec,
+        chapterIntent: params.chapterIntent,
       });
-      return {
-        content: params.chapterContent,
-        wordCount: writerCount,
-        applied: false,
-      };
+      tokenUsage = PipelineRunner.addUsage(
+        tokenUsage ?? { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+        normalized.tokenUsage,
+      );
+
+      if (normalized.finalCount < writerCount * 0.25) {
+        this.logWarn(this.languageFromLengthSpec(params.lengthSpec), {
+          zh: `字数归一化被拒绝：第${params.chapterNumber}章 ${writerCount} -> ${normalized.finalCount}（砍了${Math.round((1 - normalized.finalCount / writerCount) * 100)}%，超过安全阈值）`,
+          en: `Length normalization rejected for chapter ${params.chapterNumber}: ${writerCount} -> ${normalized.finalCount} (cut ${Math.round((1 - normalized.finalCount / writerCount) * 100)}%, exceeds safety threshold)`,
+        });
+        break;
+      }
+
+      if (!normalized.applied || normalized.normalizedContent === content) {
+        break;
+      }
+
+      content = normalized.normalizedContent;
+      finalCount = normalized.finalCount;
+      applied = true;
     }
 
-    this.logInfo(this.languageFromLengthSpec(params.lengthSpec), {
-      zh: `审计前字数归一化：第${params.chapterNumber}章 ${writerCount} -> ${normalized.finalCount}`,
-      en: `Length normalization before audit for chapter ${params.chapterNumber}: ${writerCount} -> ${normalized.finalCount}`,
-    });
+    if (applied) {
+      this.logInfo(this.languageFromLengthSpec(params.lengthSpec), {
+        zh: `审计前字数归一化：第${params.chapterNumber}章 ${writerCount} -> ${finalCount}`,
+        en: `Length normalization before audit for chapter ${params.chapterNumber}: ${writerCount} -> ${finalCount}`,
+      });
+    } else if (isOutsideSoftRange(writerCount, params.lengthSpec)) {
+      this.logWarn(this.languageFromLengthSpec(params.lengthSpec), {
+        zh: `字数仍超出软区间：第${params.chapterNumber}章 ${writerCount}（软区间 ${params.lengthSpec.softMin}-${params.lengthSpec.softMax}）`,
+        en: `Length still outside soft range for chapter ${params.chapterNumber}: ${writerCount} (soft ${params.lengthSpec.softMin}-${params.lengthSpec.softMax})`,
+      });
+    }
 
     return {
-      content: normalized.normalizedContent,
-      wordCount: normalized.finalCount,
-      applied: normalized.applied,
-      tokenUsage: normalized.tokenUsage,
+      content,
+      wordCount: finalCount,
+      applied,
+      tokenUsage,
     };
   }
 
@@ -3509,13 +3671,21 @@ ${matrix}`,
     finalCount: number,
     lengthSpec: LengthSpec,
   ): string[] {
-    if (!isOutsideHardRange(finalCount, lengthSpec)) {
+    if (!isOutsideSoftRange(finalCount, lengthSpec)) {
       return [];
+    }
+    if (isOutsideHardRange(finalCount, lengthSpec)) {
+      return [
+        this.localize(this.languageFromLengthSpec(lengthSpec), {
+          zh: `第${chapterNumber}章经过字数归一化后仍超出硬区间（${lengthSpec.hardMin}-${lengthSpec.hardMax}，实际 ${finalCount}）。`,
+          en: `Chapter ${chapterNumber} remains outside hard range (${lengthSpec.hardMin}-${lengthSpec.hardMax}, actual ${finalCount}) after length normalization.`,
+        }),
+      ];
     }
     return [
       this.localize(this.languageFromLengthSpec(lengthSpec), {
-        zh: `第${chapterNumber}章经过一次字数归一化后仍超出硬区间（${lengthSpec.hardMin}-${lengthSpec.hardMax}，实际 ${finalCount}）。`,
-        en: `Chapter ${chapterNumber} remains outside hard range (${lengthSpec.hardMin}-${lengthSpec.hardMax}, actual ${finalCount}) after a single normalization pass.`,
+        zh: `第${chapterNumber}章经过字数归一化后仍超出软区间（${lengthSpec.softMin}-${lengthSpec.softMax}，实际 ${finalCount}）。`,
+        en: `Chapter ${chapterNumber} remains outside soft range (${lengthSpec.softMin}-${lengthSpec.softMax}, actual ${finalCount}) after length normalization.`,
       }),
     ];
   }
@@ -3635,6 +3805,8 @@ ${matrix}`,
       aiTellCount: number;
       blockingCount: number;
       criticalCount: number;
+      warningCount: number;
+      infoCount: number;
       revisionBlockingIssues: ReadonlyArray<AuditIssue>;
     },
     next: {
@@ -3642,6 +3814,8 @@ ${matrix}`,
       aiTellCount: number;
       blockingCount: number;
       criticalCount: number;
+      warningCount: number;
+      infoCount: number;
       revisionBlockingIssues: ReadonlyArray<AuditIssue>;
     },
   ): MergedAuditEvaluation {
@@ -3656,6 +3830,8 @@ ${matrix}`,
       revisionBlockingIssues: previous.revisionBlockingIssues,
       blockingCount: previous.blockingCount,
       criticalCount: previous.criticalCount,
+      warningCount: previous.warningCount,
+      infoCount: previous.infoCount,
     };
   }
 
@@ -3666,6 +3842,8 @@ ${matrix}`,
     chapterContent: string;
     chapterNumber: number;
     language: LengthLanguage;
+    lengthSpec?: LengthSpec;
+    genreProfile?: GenreProfile;
     auditOptions?: {
       temperature?: number;
       chapterIntent?: string;
@@ -3694,25 +3872,55 @@ ${matrix}`,
       chapterContent: params.chapterContent,
       language: params.language,
     });
+
+    // Align with write-time review-cycle assess(): include deterministic
+    // post-write shape/style warnings so manual revise/audit sees them.
+    let postWriteIssues: ReadonlyArray<AuditIssue> = [];
+    try {
+      const { validatePostWrite } = await import("../agents/post-write-validator.js");
+      const { readBookRules } = await import("../agents/rules-reader.js");
+      const gp = params.genreProfile
+        ?? (await this.loadGenreProfile(params.book.genre)).profile;
+      const parsedBookRules = (await readBookRules(params.bookDir))?.rules ?? null;
+      postWriteIssues = mapPostWriteViolationsToAuditIssues(
+        validatePostWrite(params.chapterContent, gp, parsedBookRules, params.language),
+      );
+    } catch {
+      postWriteIssues = [];
+    }
+
+    const lengthIssues = params.lengthSpec
+      ? buildSoftLengthAuditIssues(
+        countChapterLength(params.chapterContent, params.lengthSpec.countingMode),
+        params.lengthSpec,
+      )
+      : [];
+
     const hasBlockedWords = sensitiveResult.found.some((f) => f.severity === "block");
+    const hasPostWriteCritical = postWriteIssues.some((issue) => issue.severity === "critical");
     const issues: ReadonlyArray<AuditIssue> = [
       ...llmAudit.issues,
       ...aiTells.issues,
       ...sensitiveResult.issues,
+      ...postWriteIssues,
+      ...lengthIssues,
       ...longSpanFatigue.issues,
     ];
     // revisionBlockingIssues excludes long-span-fatigue issues by
     // construction (not by category name) so that an LLM-reported issue
     // sharing a category label with a long-span issue is still counted.
+    // Post-write + soft-length warnings ARE revision blockers (same as write cycle).
     const revisionBlockingIssues: ReadonlyArray<AuditIssue> = [
       ...llmAudit.issues,
       ...aiTells.issues,
       ...sensitiveResult.issues,
+      ...postWriteIssues,
+      ...lengthIssues,
     ];
 
     return {
       auditResult: {
-        passed: hasBlockedWords ? false : llmAudit.passed,
+        passed: (hasBlockedWords || hasPostWriteCritical) ? false : llmAudit.passed,
         issues,
         summary: llmAudit.summary,
         tokenUsage: llmAudit.tokenUsage,
@@ -3720,6 +3928,8 @@ ${matrix}`,
       aiTellCount: aiTells.issues.length,
       blockingCount: revisionBlockingIssues.filter((issue) => issue.severity === "warning" || issue.severity === "critical").length,
       criticalCount: revisionBlockingIssues.filter((issue) => issue.severity === "critical").length,
+      warningCount: revisionBlockingIssues.filter((issue) => issue.severity === "warning").length,
+      infoCount: revisionBlockingIssues.filter((issue) => issue.severity === "info").length,
       revisionBlockingIssues,
     };
   }

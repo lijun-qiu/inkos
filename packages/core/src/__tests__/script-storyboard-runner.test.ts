@@ -4,11 +4,13 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   runInteractiveFilmCreation,
+  runScriptCreation,
   runStoryboardCreation,
   type StoryboardAssetsManifest,
 } from "../pipeline/script-storyboard-runner.js";
 import type { AgentContext } from "../agents/base.js";
 import { loadStoryGraph } from "../interactive-film/graph-store.js";
+import { ScriptEpisodePipelineAgent } from "../agents/script-episode.js";
 
 const chatCompletionMock = vi.hoisted(() => vi.fn());
 
@@ -345,6 +347,86 @@ describe("storyboard creation runner", () => {
     expect(graph.title).toBe("回声剧场");
     expect(graph.nodes.some((node) => node.type === "start")).toBe(true);
     expect(graph.endings.length).toBeGreaterThanOrEqual(2);
+  });
+});
+
+describe("script episode creation runner", () => {
+  let root: string;
+
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), "inkos-script-episodes-"));
+    chatCompletionMock.mockReset();
+  });
+
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+    vi.restoreAllMocks();
+  });
+
+  it("writes outline, fills a missing episode via continue, and assembles script.md", async () => {
+    const outlineSpy = vi.spyOn(ScriptEpisodePipelineAgent.prototype, "createEpisodeOutline")
+      .mockResolvedValue("# outline\n1 rebirth\n2 payback");
+    const waveSpy = vi.spyOn(ScriptEpisodePipelineAgent.prototype, "writeEpisodeWave")
+      .mockResolvedValue({
+        title: "重生短剧",
+        rawContent: [
+          "=== SCRIPT_TITLE ===",
+          "重生短剧",
+          "=== EPISODE 1 TITLE ===",
+          "重生",
+          "=== EPISODE 1 CONTENT ===",
+          "场次：卧室。林北醒来。",
+          "=== EPISODE 2 TITLE ===",
+          "空集",
+          "=== EPISODE 2 CONTENT ===",
+          "",
+        ].join("\n"),
+        episodes: [
+          { number: 1, title: "重生", content: "场次：卧室。林北醒来。", charCount: 10 },
+          { number: 2, title: "空集", content: "", charCount: 0 },
+        ],
+      });
+    const continueSpy = vi.spyOn(ScriptEpisodePipelineAgent.prototype, "continueMissingEpisodes")
+      .mockResolvedValue({
+        title: "重生短剧",
+        rawContent: "filled",
+        episodes: [
+          { number: 1, title: "重生", content: "场次：卧室。林北醒来。", charCount: 10 },
+          { number: 2, title: "复仇", content: "场次：仓库。黑蛇败退。\n（全剧终）", charCount: 16 },
+        ],
+      });
+
+    const progress: string[] = [];
+    const result = await runScriptCreation({
+      projectRoot: root,
+      runtime: makeRuntime(root),
+      title: "重生短剧",
+      instruction: "竖屏短剧，两集。",
+      episodeCount: 2,
+      projectId: "rebirth-short",
+      onProgress: (message) => progress.push(message),
+    });
+
+    expect(outlineSpy).toHaveBeenCalled();
+    expect(waveSpy).toHaveBeenCalled();
+    expect(continueSpy).toHaveBeenCalled();
+    expect(result.outlinePath).toBe("dramas/rebirth-short/outline/v001.md");
+    expect(result.draftPath).toBe("dramas/rebirth-short/drafts/v001.md");
+    expect(result.scriptPath).toBe("dramas/rebirth-short/script.md");
+
+    const script = await readFile(join(root, result.scriptPath), "utf-8");
+    expect(script).toContain("### 第1集 重生");
+    expect(script).toContain("### 第2集 复仇");
+    expect(script.match(/全剧终/g)?.length).toBe(1);
+    expect(progress.some((line) => line.includes("分集大纲") || line.includes("outline"))).toBe(true);
+    expect(progress.some((line) => /1-2\/2|补空集|missing/i.test(line))).toBe(true);
+
+    const status = JSON.parse(await readFile(join(root, "dramas/rebirth-short/status.json"), "utf-8")) as {
+      status: string;
+      episodeCount: number;
+    };
+    expect(status.status).toBe("completed");
+    expect(status.episodeCount).toBe(2);
   });
 });
 

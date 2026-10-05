@@ -353,6 +353,31 @@ describe("ComposerAgent", () => {
     expect(events[0].sources).toContain("story/chapter_summaries.md#recent_titles");
   });
 
+  it("skips local budget gating when reserved output makes available input nonpositive", async () => {
+    await writeFile(
+      join(storyDir, "author_intent.md"),
+      `# Author Intent\n\n${"protected author intent ".repeat(5000)}`,
+      "utf-8",
+    );
+
+    const composed = await composeGovernedChapter({
+      book,
+      bookDir,
+      chapterNumber: 4,
+      plan,
+      contextBudget: {
+        contextWindowTokens: 128_000,
+        reservedOutputTokens: 256_000,
+      },
+      compressibleContextCompiler: async () => {
+        throw new Error("compiler should not run when available input is nonpositive");
+      },
+    });
+
+    expect(composed.contextPackage.selectedContext.some((entry) => entry.source === "story/author_intent.md")).toBe(true);
+    expect(composed.trace.notes).toContain("context-budget-skipped-nonpositive-input");
+  });
+
   it("fails loudly when protected context alone exceeds the input budget", async () => {
     await writeFile(
       join(storyDir, "author_intent.md"),

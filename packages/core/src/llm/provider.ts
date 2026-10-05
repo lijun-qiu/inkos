@@ -12,7 +12,7 @@ import type {
 import { resolveServicePreset } from "./service-presets.js";
 import { getEndpoint } from "./providers/index.js";
 import { lookupModel } from "./providers/lookup.js";
-import { fetchWithProxy } from "../utils/proxy-fetch.js";
+import { fetchWithProxy, resetLlmProxyAgents } from "../utils/proxy-fetch.js";
 import { isApiKeyOptionalForEndpoint } from "../utils/llm-endpoint-auth.js";
 import { isLlmStubEnabled, stubChatCompletion } from "../agent/llm-stub.js";
 import { createLeadingThinkTagStripper, stripLeadingThinkBlock } from "./think-tag-stripper.js";
@@ -33,14 +33,17 @@ export type OnThinkingDelta = (text: string) => void;
 const INKOS_USER_AGENT = "InkOS/1.3.5";
 const UNKNOWN_MODEL_FALLBACK_MAX_TOKENS = 8192 * 3;
 /** Extra attempts after the first failure for generic transient HTTP/transport errors. */
-const TRANSIENT_LLM_RETRIES = 2;
+const TRANSIENT_LLM_RETRIES = 3;
 /**
- * Extra attempts after the first failure for mid-stream PartialResponseError
- * (full rewrite). Free OpenRouter routes often drop long Ultra streams.
+ * Extra attempts after the first failure for mid-stream PartialResponseError /
+ * empty responses / transport blips (full rewrite). Free OpenRouter + local
+ * Clash tunnels often need several tries.
  */
-const PARTIAL_RESPONSE_LLM_RETRIES = 3;
-/** Backoff before each stream-rewrite attempt (ms): 1s → 3s → 10s. */
-const PARTIAL_RESPONSE_BACKOFF_MS = [1_000, 3_000, 10_000] as const;
+const PARTIAL_RESPONSE_LLM_RETRIES = 8;
+/** Backoff before each rewrite attempt (ms). */
+const PARTIAL_RESPONSE_BACKOFF_MS = [
+  2_000, 5_000, 10_000, 20_000, 40_000, 60_000, 60_000, 90_000,
+] as const;
 /**
  * Extra attempts after the first failure for rate-limit (429) errors.
  * Sized to cover ~1–2 full free-Flash rotations plus long backoff.
@@ -171,6 +174,8 @@ export interface LLMClient {
   readonly apiFormat: "chat" | "responses";
   readonly stream: boolean;
   readonly proxyUrl?: string;
+  /** Project root for secrets / service key resolution (optional). */
+  readonly _projectRoot?: string;
   readonly _piModel?: PiModel<PiApi>;
   readonly _apiKey?: string;
   readonly defaults: {
@@ -191,9 +196,14 @@ export interface LLMClient {
   };
 }
 
+/** Runtime client config: persisted LLMConfig plus optional projectRoot for key pools. */
+export type CreateLLMClientConfig = LLMConfig & {
+  readonly projectRoot?: string;
+};
+
 // === Factory ===
 
-export function createLLMClient(config: LLMConfig): LLMClient {
+export function createLLMClient(config: CreateLLMClientConfig): LLMClient {
   // C1 (v2.0.0)：config.maxTokens / maxTokensCap 已删除；defaults.maxTokens 完全从 modelCard 推导。
   const _earlyCard = lookupModel(config.service ?? "custom", config.model);
   const _earlyMax = _earlyCard?.maxOutput ?? UNKNOWN_MODEL_FALLBACK_MAX_TOKENS;
@@ -271,6 +281,7 @@ export function createLLMClient(config: LLMConfig): LLMClient {
     apiFormat,
     stream,
     proxyUrl: config.proxyUrl,
+    ...(config.projectRoot ? { _projectRoot: config.projectRoot } : {}),
     _piModel: piModel,
     _apiKey: config.apiKey,
     defaults,
@@ -625,18 +636,34 @@ function collectErrorText(error: unknown, depth = 0): string {
   return parts.join("\n");
 }
 
-function isTransientLLMTransportError(error: unknown): boolean {
+/**
+ * Connect / socket blips worth retrying. Keep in sync with the connection-error
+ * branch in wrapLLMError — free-tier proxies often surface these as
+ * "fetch failed" / ECONNREFUSED before any HTTP status exists.
+ */
+export function isTransientLLMTransportError(error: unknown): boolean {
   const text = collectErrorText(error);
+  const lower = text.toLowerCase();
   return [
     "terminated",
     "UND_ERR_SOCKET",
     "ECONNRESET",
+    "ECONNREFUSED",
+    "ENOTFOUND",
+    "EAI_AGAIN",
     "ETIMEDOUT",
     "EPIPE",
     "socket hang up",
     "other side closed",
     "network socket disconnected",
-  ].some((needle) => text.includes(needle));
+    "fetch failed",
+    "connection error",
+    "connect timeout",
+    "ConnectTimeoutError",
+    "HeadersTimeoutError",
+    "BodyTimeoutError",
+    "无法连接",
+  ].some((needle) => text.includes(needle) || lower.includes(needle.toLowerCase()));
 }
 
 /**
@@ -740,13 +767,19 @@ async function withTransientLLMRetry<T>(
       const partialResponse = error instanceof PartialResponseError;
       const emptyResponse = error instanceof EmptyResponseError
         || (error instanceof Error && /LLM returned empty response/i.test(error.message));
+      const transportBlip = isTransientLLMTransportError(error);
       const maxRetries = (rateLimited || maxTokensParamError)
         ? RATE_LIMIT_LLM_RETRIES
-        : (partialResponse || emptyResponse)
+        : (partialResponse || emptyResponse || transportBlip)
           ? PARTIAL_RESPONSE_LLM_RETRIES
           : TRANSIENT_LLM_RETRIES;
+      // Studio wires onThinkingDelta for all agents, which used to flip
+      // rateLimitOnly and skip connect failures — then state-validator / audit
+      // died on the first proxy blip. Treat transport the same as empty/partial
+      // (full rewrite). Mid-stream HTTP 502 without PartialResponse still stays
+      // non-retryable under rateLimitOnly to avoid duplicating visible text.
       const retryable = options?.rateLimitOnly
-        ? (rateLimited || maxTokensParamError || partialResponse || emptyResponse)
+        ? (rateLimited || maxTokensParamError || partialResponse || emptyResponse || transportBlip)
         : (isRetryableLLMError(error) || maxTokensParamError || emptyResponse);
       if (!enabled || attempt >= maxRetries || !retryable) {
         throw error;
@@ -767,18 +800,24 @@ async function withTransientLLMRetry<T>(
           + (switched ? " (model rotated)" : ""),
         );
         await abortableDelay(delayMs, options?.signal);
-      } else if (partialResponse || emptyResponse) {
+      } else if (partialResponse || emptyResponse || transportBlip) {
         const delayMs = PARTIAL_RESPONSE_BACKOFF_MS[
           Math.min(attempt, PARTIAL_RESPONSE_BACKOFF_MS.length - 1)
         ]!;
+        if (transportBlip) {
+          // Half-open Clash keep-alives often need a fresh ProxyAgent tunnel.
+          resetLlmProxyAgents();
+        }
         console.warn(
           partialResponse
             ? `[llm] stream interrupted after ${(error as PartialResponseError).partialContent.length} chars — rewriting attempt ${attempt + 1}/${maxRetries} after ${Math.round(delayMs / 1000)}s`
-            : `[llm] empty LLM response — rewriting attempt ${attempt + 1}/${maxRetries} after ${Math.round(delayMs / 1000)}s`,
+            : emptyResponse
+              ? `[llm] empty LLM response — rewriting attempt ${attempt + 1}/${maxRetries} after ${Math.round(delayMs / 1000)}s`
+              : `[llm] transport/connect blip — rewriting attempt ${attempt + 1}/${maxRetries} after ${Math.round(delayMs / 1000)}s`,
         );
         await abortableDelay(delayMs, options?.signal);
       } else {
-        // Short linear backoff for 502/503/transport blips (~0.8s, ~1.6s).
+        // Short linear backoff for 502/503 blips (~0.8s, ~1.6s, ~2.4s).
         await abortableDelay(800 * (attempt + 1), options?.signal);
       }
     }
@@ -805,6 +844,10 @@ async function abortableDelay(delayMs: number, signal?: AbortSignal): Promise<vo
   });
 }
 
+function isCustomClientService(service: string | undefined): boolean {
+  return service === "custom" || Boolean(service?.startsWith("custom:"));
+}
+
 function shouldUseNativeCustomTransport(client: LLMClient): boolean {
   if (client.service === "minimax" && client.provider === "openai") {
     return true;
@@ -819,6 +862,15 @@ function shouldUseNativeCustomTransport(client: LLMClient): boolean {
   }
   // DeepSeek V4 defaults to thinking-on; same native path to inject thinking.disabled.
   if (client.service === "deepseek" && client.provider === "openai") {
+    return true;
+  }
+  // 魔搭 ModelScope DeepSeek V4：同样默认 thinking-on，需原生路径注入 disabled。
+  if (client.service === "modelscope" && client.provider === "openai") {
+    return true;
+  }
+  // Agnes flash 默认 thinking-on；需原生路径注入 enable_thinking:false，
+  // 否则短 max_tokens / 流式写作易把额度耗在 reasoning_content、正文为空。
+  if (client.service === "agnes" && client.provider === "openai") {
     return true;
   }
   // Google via /openai + proxy: same native path so INKOS_LLM_PROXY_URL is honored.
@@ -837,7 +889,7 @@ function shouldUseNativeCustomTransport(client: LLMClient): boolean {
   ) {
     return true;
   }
-  if (client.service === "custom") {
+  if (isCustomClientService(client.service)) {
     if (
       client.configSource === "studio"
       && (client.provider === "openai" || client.provider === "anthropic")
@@ -908,9 +960,18 @@ function defaultOpenAIChatExtra(client: LLMClient, model: string): Record<string
     // the field, so always send disabled for InkOS writing/settlement traffic.
     return { thinking: { type: "disabled" } };
   }
-  if (client.service === "deepseek") {
+  if (
+    client.service === "deepseek"
+    || client.service === "modelscope"
+    // 中转站上的 deepseek-v4-* 同样默认 thinking-on；不关掉会把短 max_tokens 耗在 reasoning_content。
+    || (isCustomClientService(client.service) && /deepseek-v4/i.test(model))
+  ) {
     // deepseek-v4-* defaults to thinking mode; disable for drafting throughput.
     return { thinking: { type: "disabled" } };
+  }
+  if (client.service === "agnes") {
+    // Agnes OpenAI 兼容端点认 enable_thinking；thinking:{type:disabled} 反而会只吐 reasoning。
+    return { enable_thinking: false };
   }
   if (client.service === "google") {
     // Gemini 3.x defaults to medium thinking; keep it minimal for novel drafting
@@ -923,11 +984,12 @@ function defaultOpenAIChatExtra(client: LLMClient, model: string): Record<string
       return { reasoning: { effort: "minimal" } };
     }
     // Writing stack (Ultra): disable reasoning — long free-route thoughts burn
-    // completion tokens and wall time. Planning/audit stack (Super): light thinking.
+    // completion tokens and wall time. Tool/planning stack (Laguna, legacy Super):
+    // light thinking so agents still call tools without burning the free quota.
     if (/nemotron-3-ultra/i.test(model)) {
       return { reasoning: { effort: "none" } };
     }
-    if (/nemotron-3-super/i.test(model)) {
+    if (/laguna-s-2\.1/i.test(model) || /nemotron-3-super/i.test(model)) {
       return { reasoning: { effort: "minimal" } };
     }
     return { reasoning: { effort: "none" } };
@@ -1292,10 +1354,11 @@ async function chatCompletionViaCustomAnthropicCompatible(
   signal?: AbortSignal,
 ): Promise<LLMResponse> {
   const baseUrl = client._piModel?.baseUrl ?? "";
-  const errorCtx = { baseUrl, model, service: client.service };
+  const wireModel = resolveWireModelId(client.service, model);
+  const errorCtx = { baseUrl, model: wireModel, service: client.service };
   const extra = stripReservedKeys(resolved.extra);
   const payload: Record<string, unknown> = {
-    model,
+    model: wireModel,
     messages: buildAnthropicMessages(messages),
     stream: client.stream,
     max_tokens: resolved.maxTokens,
@@ -1409,12 +1472,13 @@ async function chatCompletionViaCustomOpenAICompatible(
   }
   const baseUrl = client._piModel?.baseUrl ?? "";
   const headers = buildCustomHeaders(client);
-  const errorCtx = { baseUrl, model, service: client.service };
+  const wireModel = resolveWireModelId(client.service, model);
+  const errorCtx = { baseUrl, model: wireModel, service: client.service };
   const extra = stripReservedKeys(resolved.extra);
 
   if (client.apiFormat === "responses") {
     const payload: Record<string, unknown> = {
-      model,
+      model: wireModel,
       input: buildResponsesInput(messages),
       stream: client.stream,
       store: false,
@@ -1503,7 +1567,7 @@ async function chatCompletionViaCustomOpenAICompatible(
   }
 
   const payload: Record<string, unknown> = {
-    model,
+    model: wireModel,
     messages: [
       ...messages
         .filter((message) => message.role === "system")
@@ -1688,7 +1752,7 @@ export async function chatCompletion(
 
   try {
     const hasStreamDeltas = Boolean(onTextDelta || onThinkingDelta);
-    return await withTransientLLMRetry(
+    const response = await withTransientLLMRetry(
       async () => {
         signal?.throwIfAborted();
         const callModel = activeModel;
@@ -1751,6 +1815,7 @@ export async function chatCompletion(
         },
       },
     );
+    return response;
   } catch (error) {
     // 注意：中断的流（PartialResponseError）不再"打捞"半截内容当成功返回——
     // 那会产出写到一半就结束的章节/设定文件。重试由 withTransientLLMRetry
@@ -1770,13 +1835,25 @@ export async function chatCompletion(
  * we override .id / .name when the caller passes a different model string
  * (e.g. agent overrides).
  */
+/** App/config model id → API wire id（有 deploymentName 时用它）。 */
+function resolveWireModelId(service: string | undefined, model: string): string {
+  return lookupModel(service ?? "custom", model)?.deploymentName ?? model;
+}
+
 function resolvePiModel(client: LLMClient, model: string): PiModel<PiApi> {
   const base = client._piModel!;
-  if (base.id === model && base.name === model) return base;
   const card = lookupModel(client.service ?? "custom", model);
+  const wireId = card?.deploymentName ?? model;
+  if (base.id === wireId && base.name === model) {
+    return {
+      ...base,
+      ...(card?.contextWindowTokens ? { contextWindow: card.contextWindowTokens } : {}),
+      ...(card?.maxOutput ? { maxTokens: card.maxOutput } : {}),
+    };
+  }
   return {
     ...base,
-    id: model,
+    id: wireId,
     name: model,
     ...(card?.contextWindowTokens ? { contextWindow: card.contextWindowTokens } : {}),
     ...(card?.maxOutput ? { maxTokens: card.maxOutput } : {}),

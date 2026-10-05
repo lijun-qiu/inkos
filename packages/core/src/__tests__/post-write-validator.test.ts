@@ -1,8 +1,10 @@
 import { describe, it, expect } from "vitest";
 import {
+  countReferentUnits,
   detectDuplicateTitle,
   detectParagraphLengthDrift,
   detectParagraphShapeWarnings,
+  detectReferentCountMismatches,
   resolveDuplicateTitle,
   normalizePostWriteSurface,
   validatePostWrite,
@@ -360,5 +362,70 @@ describe("validatePostWrite", () => {
     expect(result.issues.some((issue) => issue.rule === "title-collapse")).toBe(true);
     expect(result.title).not.toContain("名单");
     expect(result.title).toContain("塔楼");
+  });
+
+  it("flags N字 claims that disagree with a nearby quoted referent", () => {
+    const content = "血祭司。两字在识海炸开，他几乎站不稳。";
+    const mismatches = detectReferentCountMismatches(content);
+    expect(mismatches.some((v) => v.rule === "指称数量")).toBe(true);
+    expect(findRule(validatePostWrite(content, baseProfile, null), "指称数量")).toBeDefined();
+  });
+
+  it("flags quoted term + wrong 字 count", () => {
+    const content = "「血祭司」两字刚出口，殿里的灯全灭了。";
+    const mismatches = detectReferentCountMismatches(content);
+    expect(mismatches[0]?.description).toContain("实际为3字");
+    expect(mismatches[0]?.description).toContain("却写成「2字」");
+  });
+
+  it("flags name-list + wrong 人 count", () => {
+    const content = "张三、李四、王五两人同时抬头。";
+    const mismatches = detectReferentCountMismatches(content);
+    expect(mismatches.some((v) => v.description.includes("实际为3人"))).toBe(true);
+  });
+
+  it("does not flag matching referent counts", () => {
+    expect(countReferentUnits("血祭司")).toBe(3);
+    const content = [
+      "「血祭司」三字在识海炸开。",
+      "血祭司。三字在脑海浮现。",
+      "张三、李四两人同时抬头。",
+    ].join("");
+    expect(detectReferentCountMismatches(content)).toHaveLength(0);
+  });
+
+  it("flags delayed anaphora when N字 refers back to an earlier quoted term", () => {
+    const content =
+      "“弑神者……”身后极轻冷哼，被风雨吞没。仿佛有双眼睛贴在背脊，隔着雨幕把两字刻得更深。";
+    const mismatches = detectReferentCountMismatches(content);
+    expect(mismatches.some((v) => v.rule === "指称数量")).toBe(true);
+    expect(mismatches[0]?.description).toContain("弑神者");
+    expect(mismatches[0]?.description).toContain("实际为3字");
+  });
+
+  it("does not flag delayed anaphora when the later count matches", () => {
+    const content =
+      "“弑神者……”身后极轻冷哼，被风雨吞没。仿佛有双眼睛贴在背脊，隔着雨幕把三字刻得更深。";
+    expect(detectReferentCountMismatches(content)).toHaveLength(0);
+  });
+
+  it("flags cataphora when N字 appears before the quoted term", () => {
+    const content = "两字在识海炸开——「血祭司」。殿里的灯全灭了。";
+    const mismatches = detectReferentCountMismatches(content);
+    expect(mismatches.some((v) => v.rule === "指称数量")).toBe(true);
+    expect(mismatches[0]?.description).toContain("血祭司");
+    expect(mismatches[0]?.description).toContain("实际为3字");
+  });
+
+  it("flags adjacent N字 then quote mismatch", () => {
+    const content = "他吐出那两字：“弑神者……”。";
+    const mismatches = detectReferentCountMismatches(content);
+    expect(mismatches.some((v) => v.description.includes("弑神者"))).toBe(true);
+    expect(mismatches.some((v) => v.description.includes("实际为3字"))).toBe(true);
+  });
+
+  it("does not flag cataphora when the count matches the later quote", () => {
+    const content = "三字在识海炸开——「血祭司」。殿里的灯全灭了。";
+    expect(detectReferentCountMismatches(content)).toHaveLength(0);
   });
 });

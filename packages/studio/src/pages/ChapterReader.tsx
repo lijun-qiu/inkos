@@ -3,6 +3,7 @@ import { fetchJson, useApi, postApi } from "../hooks/use-api";
 import type { Theme } from "../hooks/use-theme";
 import type { TFunction } from "../hooks/use-i18n";
 import { useColors } from "../hooks/use-colors";
+import { ConfirmDialog } from "../components/ConfirmDialog";
 import {
   ChevronLeft,
   Check,
@@ -45,6 +46,7 @@ export function ChapterReader({ bookId, chapterNumber, nav, theme, t }: {
   const [editing, setEditing] = useState(false);
   const [editContent, setEditContent] = useState("");
   const [saving, setSaving] = useState(false);
+  const [confirmRejectOpen, setConfirmRejectOpen] = useState(false);
 
   const handleStartEdit = () => {
     if (!data) return;
@@ -127,7 +129,8 @@ export function ChapterReader({ bookId, chapterNumber, nav, theme, t }: {
           <span className="text-border">/</span>
           <button
             onClick={() => nav.toBook(bookId)}
-            className="hover:text-primary transition-colors truncate max-w-[120px]"
+            title={bookId}
+            className="hover:text-primary transition-colors break-words whitespace-normal min-w-0 max-w-[min(100%,280px)] text-left"
           >
             {bookId}
           </button>
@@ -184,7 +187,7 @@ export function ChapterReader({ bookId, chapterNumber, nav, theme, t }: {
             {t("reader.approve")}
           </button>
           <button
-            onClick={handleReject}
+            onClick={() => setConfirmRejectOpen(true)}
             className="flex items-center gap-2 px-4 py-2 text-xs font-bold bg-destructive/10 text-destructive rounded-xl hover:bg-destructive hover:text-white transition-all border border-destructive/20 shadow-sm"
           >
             <XCircle size={14} />
@@ -261,6 +264,20 @@ export function ChapterReader({ bookId, chapterNumber, nav, theme, t }: {
           <div />
         )}
       </div>
+
+      <ConfirmDialog
+        open={confirmRejectOpen}
+        title={t("reader.confirmRejectTitle")}
+        message={t("reader.confirmReject")}
+        confirmLabel={t("reader.reject")}
+        cancelLabel={t("common.cancel")}
+        variant="danger"
+        onConfirm={async () => {
+          setConfirmRejectOpen(false);
+          await handleReject();
+        }}
+        onCancel={() => setConfirmRejectOpen(false)}
+      />
     </div>
   );
 }

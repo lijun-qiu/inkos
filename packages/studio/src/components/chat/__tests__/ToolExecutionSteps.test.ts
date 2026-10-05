@@ -374,8 +374,8 @@ describe("groupChronologically", () => {
         actionPayload: {
           shortRun: {
             direction: "婚姻反杀",
-            chapters: 12,
-            charsPerChapter: 1000,
+            chapters: 50,
+            charsPerChapter: 2000,
             cover: true,
           },
         },
@@ -394,8 +394,8 @@ describe("groupChronologically", () => {
       actionPayload: {
         shortRun: {
           direction: "婚姻反杀",
-          chapters: 12,
-          charsPerChapter: 1000,
+          chapters: 50,
+          charsPerChapter: 2000,
           cover: true,
         },
       },

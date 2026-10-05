@@ -1,4 +1,5 @@
 import { getEndpoint } from "./providers/index.js";
+import { isOpenRouterFreeModel } from "./providers/endpoints/openrouter.js";
 import { probeModelsFromUpstream } from "./providers/probe.js";
 import { isApiKeyOptionalForEndpoint } from "../utils/llm-endpoint-auth.js";
 
@@ -19,7 +20,7 @@ export interface ServicePreset {
 export const SERVICE_PRESETS: Record<string, ServicePreset> = {
   openai:      { providerFamily: "openai",    api: "openai-responses",   baseUrl: "https://api.openai.com/v1",                          label: "OpenAI",          temperatureRange: [0, 2], defaultTemperature: 1.0, writingTemperature: 1.0 },
   anthropic:   { providerFamily: "anthropic", api: "anthropic-messages", baseUrl: "https://api.anthropic.com",                          label: "Anthropic",       temperatureRange: [0, 1], defaultTemperature: 1.0, writingTemperature: 1.0, temperatureHint: "不要同时改 temperature 和 top_p" },
-  deepseek:    { providerFamily: "openai",    api: "openai-completions", baseUrl: "https://api.deepseek.com",                           label: "DeepSeek",        temperatureRange: [0, 2], defaultTemperature: 1.0, writingTemperature: 1.5, temperatureHint: "创意写作推荐 1.5" },
+  deepseek:    { providerFamily: "openai",    api: "openai-completions", baseUrl: "https://api.deepseek.com/v1",                        label: "DeepSeek",        temperatureRange: [0, 2], defaultTemperature: 1.0, writingTemperature: 1.5, temperatureHint: "创意写作推荐 1.5" },
   moonshot:    { providerFamily: "openai",    api: "openai-completions", baseUrl: "https://api.moonshot.cn/v1",                         label: "Moonshot (Kimi)", temperatureRange: [0, 1], defaultTemperature: 0.3, writingTemperature: 1.0, temperatureHint: "kimi-k2.5 推荐 temperature=1.0" },
   minimax:     {
     providerFamily: "openai",
@@ -44,8 +45,10 @@ export const SERVICE_PRESETS: Record<string, ServicePreset> = {
   zhipu:       { providerFamily: "openai",    api: "openai-completions", baseUrl: "https://open.bigmodel.cn/api/paas/v4",               label: "智谱 GLM",        temperatureRange: [0, 1], defaultTemperature: 0.95, writingTemperature: 0.95, piProvider: "zai" },
   siliconflow: { providerFamily: "openai",    api: "openai-completions", baseUrl: "https://api.siliconflow.cn/v1",                      label: "硅基流动" },
   ppio:        { providerFamily: "openai",    api: "openai-completions", baseUrl: "https://api.ppinfra.com/v3/openai",                  label: "PPIO" },
-  openrouter:  { providerFamily: "openai",    api: "openai-responses",   baseUrl: "https://openrouter.ai/api/v1",                       label: "OpenRouter",      piProvider: "openrouter" },
+  openrouter:  { providerFamily: "openai",    api: "openai-responses",   baseUrl: "https://openrouter.ai/api/v1",                       label: "OpenRouter 代理",  piProvider: "openrouter" },
   kkaiapi:     { providerFamily: "openai",    api: "openai-completions", baseUrl: "https://api.kkaiapi.com/v1",                         label: "kkaiapi",         modelsBaseUrl: "https://api.kkaiapi.com/v1" },
+  agnes:       { providerFamily: "openai",    api: "openai-completions", baseUrl: "https://apihub.agnes-ai.com/v1",                     label: "Agnes AI" },
+  modelscope:  { providerFamily: "openai",    api: "openai-completions", baseUrl: "http://127.0.0.1:10001",                         label: "魔塔代理" },
   ollama:      { providerFamily: "openai",    api: "openai-completions", baseUrl: "http://localhost:11434/v1",                          label: "Ollama (本地)" },
   custom:      { providerFamily: "openai",    api: "openai-completions", baseUrl: "",                                                    label: "自定义端点" },
 };
@@ -182,12 +185,20 @@ export async function listModelsForService(
     }
   }
 
-  // 2) provider bank fallback / 补充
+  // 2) provider bank fallback / 补充（bank 里有、live 没有的条目插到前面，新模型才能进选择器）
   if (provider) {
+    const extras: ModelInfo[] = [];
     for (const m of provider.models) {
       if (m.enabled === false) continue;
       if (byId.has(m.id)) continue;
-      byId.set(m.id, toModelInfo(m));
+      extras.push(toModelInfo(m));
+    }
+    if (extras.length > 0) {
+      const merged = new Map<string, ModelInfo>();
+      for (const extra of extras) merged.set(extra.id, extra);
+      for (const [id, info] of byId) merged.set(id, info);
+      byId.clear();
+      for (const [id, info] of merged) byId.set(id, info);
     }
   }
 
@@ -198,7 +209,11 @@ export async function listModelsForService(
     }
   }
 
-  return Array.from(byId.values());
+  let result = Array.from(byId.values());
+  if (service === "openrouter") {
+    result = result.filter((m) => isOpenRouterFreeModel(m.id));
+  }
+  return result;
 }
 
 export async function listServicesWithModelCount(): Promise<ReadonlyArray<{ service: string; label: string; modelCount: number }>> {

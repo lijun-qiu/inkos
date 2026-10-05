@@ -161,8 +161,8 @@ describe("agent tools language wiring (en parity)", () => {
       shortRun: {
         direction: "an office suspense story about forged expense records",
         language: "en",
-        chapters: 12,
-        charsPerChapter: 650,
+        chapters: 50,
+        charsPerChapter: 1350,
         cover: false,
       },
     } as any);
@@ -172,7 +172,7 @@ describe("agent tools language wiring (en parity)", () => {
       actionPayload: {
         shortRun: {
           language: "en",
-          charsPerChapter: 650,
+          charsPerChapter: 1350,
         },
       },
     });
@@ -184,8 +184,8 @@ describe("agent tools language wiring (en parity)", () => {
       instruction: "Write a complete English suspense short story.",
       shortRun: {
         direction: "an office suspense story about forged expense records",
-        chapters: 12,
-        charsPerChapter: 650,
+        chapters: 50,
+        charsPerChapter: 1350,
         cover: false,
       },
     } as any);
@@ -202,8 +202,8 @@ describe("agent tools language wiring (en parity)", () => {
       shortRun: {
         direction: "an English office suspense story about forged expense records",
         language: "en",
-        chapters: 12,
-        charsPerChapter: 650,
+        chapters: 50,
+        charsPerChapter: 1350,
         cover: false,
       },
     } as any);
@@ -213,7 +213,7 @@ describe("agent tools language wiring (en parity)", () => {
       actionPayload: {
         shortRun: {
           language: "en",
-          charsPerChapter: 650,
+          charsPerChapter: 1350,
         },
       },
     });
@@ -261,8 +261,8 @@ describe("agent tools language wiring (en parity)", () => {
         shortRun: {
           direction: "an English office thriller",
           language: "en",
-          chapters: 12,
-          charsPerChapter: 650,
+          chapters: 50,
+          charsPerChapter: 1350,
           cover: false,
         },
       } as any,
@@ -272,7 +272,7 @@ describe("agent tools language wiring (en parity)", () => {
 
     expect(runShortFictionProductionMock.mock.calls[0]![0]).toMatchObject({
       language: "en",
-      charsPerChapter: 650,
+      charsPerChapter: 1350,
     });
   });
 

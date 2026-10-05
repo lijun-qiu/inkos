@@ -96,18 +96,31 @@ export async function rehydrateServiceConnectionStatus(args: {
   readonly fetchJsonImpl?: JsonFetcher;
 }): Promise<{
   readonly apiKey: string;
+  readonly apiKeys: Array<{ key: string; label?: string }>;
   readonly status: ServiceDetailConnectionStatus;
   readonly detectedModel: string;
   readonly detectedConfig: ServiceDetailDetectedConfig | null;
 }> {
   const fetchJsonImpl = args.fetchJsonImpl ?? fetchJson;
-  const secret = await fetchJsonImpl<{ apiKey?: string }>(
+  const secret = await fetchJsonImpl<{
+    apiKey?: string;
+    apiKeys?: Array<{ key?: string; label?: string }>;
+  }>(
     `/services/${encodeURIComponent(args.effectiveServiceId)}/secret`,
   );
   const apiKey = String(secret.apiKey ?? "");
+  const apiKeys = Array.isArray(secret.apiKeys)
+    ? secret.apiKeys
+      .map((entry) => ({
+        key: String(entry.key ?? "").trim(),
+        ...(typeof entry.label === "string" && entry.label.trim() ? { label: entry.label.trim() } : {}),
+      }))
+      .filter((entry) => entry.key.length > 0)
+    : [];
 
   return {
     apiKey,
+    apiKeys,
     status: { state: "idle" },
     detectedModel: "",
     detectedConfig: null,
@@ -134,6 +147,7 @@ export async function saveServiceConfig(args: {
   readonly isCustom: boolean;
   readonly resolvedCustomName: string;
   readonly apiKey: string;
+  readonly apiKeys?: Array<{ key: string; label?: string }>;
   readonly baseUrl: string;
   readonly apiFormat: "chat" | "responses";
   readonly stream: boolean;
@@ -222,7 +236,17 @@ export async function saveServiceConfig(args: {
   await fetchJsonImpl(`/services/${encodeURIComponent(args.effectiveServiceId)}/secret`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ apiKey: trimmedKey }),
+    body: JSON.stringify({
+      apiKey: trimmedKey,
+      ...(args.apiKeys
+        ? {
+            apiKeys: args.apiKeys.map((entry) => ({
+              key: entry.key.trim(),
+              ...(entry.label ? { label: entry.label } : {}),
+            })),
+          }
+        : {}),
+    }),
   });
 
   await fetchJsonImpl("/services/config", {

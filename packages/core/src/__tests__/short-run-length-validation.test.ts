@@ -26,43 +26,43 @@ import { ShortRunActionPayloadSchema, normalizeActionPayload } from "../interact
 import { createProposeActionTool, createShortFictionRunTool } from "../agent/agent-tools.js";
 
 describe("short_run charsPerChapter validation (envelope layer)", () => {
-  it("rejects an English charsPerChapter in the zh char range (en+1100)", () => {
+  it("rejects an English charsPerChapter in the zh char range (en+2000)", () => {
     const parsed = ShortRunActionPayloadSchema.safeParse({
       direction: "an office suspense story",
       language: "en",
-      charsPerChapter: 1100,
+      charsPerChapter: 2000,
     });
     expect(parsed.success).toBe(false);
-    expect(JSON.stringify(!parsed.success ? parsed.error.issues : [])).toMatch(/600-800/);
+    expect(JSON.stringify(!parsed.success ? parsed.error.issues : [])).toMatch(/1200-1500/);
   });
 
-  it("rejects a Chinese charsPerChapter in the en word range (zh+650)", () => {
+  it("rejects a Chinese charsPerChapter in the en word range (zh+1350)", () => {
     const parsed = ShortRunActionPayloadSchema.safeParse({
       direction: "女频短篇 婚姻背叛 证据反杀",
       language: "zh",
-      charsPerChapter: 650,
+      charsPerChapter: 1350,
     });
     expect(parsed.success).toBe(false);
-    expect(JSON.stringify(!parsed.success ? parsed.error.issues : [])).toMatch(/900-1200/);
+    expect(JSON.stringify(!parsed.success ? parsed.error.issues : [])).toMatch(/1800-2200/);
   });
 
-  it("accepts en+700 and zh+1000", () => {
+  it("accepts en+1350 and zh+2000", () => {
     expect(ShortRunActionPayloadSchema.safeParse({
       direction: "an office suspense story",
       language: "en",
-      charsPerChapter: 700,
+      charsPerChapter: 1350,
     }).success).toBe(true);
     expect(ShortRunActionPayloadSchema.safeParse({
       direction: "女频短篇 婚姻背叛 证据反杀",
       language: "zh",
-      charsPerChapter: 1000,
+      charsPerChapter: 2000,
     }).success).toBe(true);
   });
 
-  it("keeps the 600-1200 union when language is omitted (session default decides later)", () => {
+  it("keeps the en/zh union when language is omitted (session default decides later)", () => {
     expect(ShortRunActionPayloadSchema.safeParse({
       direction: "a short story",
-      charsPerChapter: 900,
+      charsPerChapter: 1500,
     }).success).toBe(true);
   });
 
@@ -71,25 +71,25 @@ describe("short_run charsPerChapter validation (envelope layer)", () => {
       shortRun: {
         direction: "an office suspense story",
         language: "en",
-        charsPerChapter: 1100,
+        charsPerChapter: 2000,
       },
-    })).toThrow(/600-800/);
+    })).toThrow(/1200-1500/);
   });
 });
 
 describe("short_run charsPerChapter validation (propose_action)", () => {
-  it("rejects en+1100 when the model proposes the confirmation card", async () => {
-    await expect(createProposeActionTool("zh").execute("propose-short-en-1100", {
+  it("rejects en+2000 when the model proposes the confirmation card", async () => {
+    await expect(createProposeActionTool("zh").execute("propose-short-en-2000", {
       action: "short_run",
-      instruction: "用户要求写一篇英文短篇，每章 1100",
+      instruction: "用户要求写一篇英文短篇，每章 2000",
       shortRun: {
         direction: "an English office suspense story",
         language: "en",
-        chapters: 12,
-        charsPerChapter: 1100,
+        chapters: 50,
+        charsPerChapter: 2000,
         cover: false,
       },
-    } as never)).rejects.toThrow(/600-800/);
+    } as never)).rejects.toThrow(/1200-1500/);
   });
 });
 
@@ -105,7 +105,7 @@ describe("short_run charsPerChapter validation (tool layer, before pipeline star
     await rm(root, { recursive: true, force: true });
   });
 
-  it("throws before starting the pipeline when a zh session confirms en+1100", async () => {
+  it("throws before starting the pipeline when a zh session confirms en+2000", async () => {
     const pipeline = { createAgentContext: vi.fn(() => ({})) };
     const tool = createShortFictionRunTool(pipeline as never, root, {
       language: "zh",
@@ -113,29 +113,29 @@ describe("short_run charsPerChapter validation (tool layer, before pipeline star
         shortRun: {
           direction: "an English office suspense story",
           language: "en",
-          charsPerChapter: 1100,
+          charsPerChapter: 2000,
           cover: false,
         },
-      } as never,
+      },
     });
-
-    await expect(tool.execute("short-en-1100", { direction: "fallback direction" } as never))
-      .rejects.toThrow(/600-800/);
+    await expect(tool.execute("short-en-2000", {
+      direction: "an English office suspense story",
+    } as never)).rejects.toThrow(/1200-1500/);
     expect(runShortFictionProductionMock).not.toHaveBeenCalled();
   });
 
-  it("throws before starting the pipeline when an en session passes a zh-range params value", async () => {
+  it("throws before starting the pipeline when params alone carry an out-of-range en value", async () => {
     const pipeline = { createAgentContext: vi.fn(() => ({})) };
     const tool = createShortFictionRunTool(pipeline as never, root, { language: "en" });
-
-    await expect(tool.execute("short-en-params-1100", {
-      direction: "office revenge thriller",
-      charsPerChapter: 1100,
-    } as never)).rejects.toThrow(/600-800/);
+    await expect(tool.execute("short-en-params-2000", {
+      direction: "an English office suspense story",
+      language: "en",
+      charsPerChapter: 2000,
+    } as never)).rejects.toThrow(/1200-1500/);
     expect(runShortFictionProductionMock).not.toHaveBeenCalled();
   });
 
-  it("keeps the en no-length behavior: runner receives undefined and applies its own 650 default", async () => {
+  it("keeps the en no-length behavior: runner receives undefined and applies its own 1350 default", async () => {
     const pipeline = { createAgentContext: vi.fn(() => ({})) };
     const tool = createShortFictionRunTool(pipeline as never, root, {
       language: "zh",

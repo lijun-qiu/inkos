@@ -1,0 +1,21 @@
+{
+  "kind": "script",
+  "title": "元婴失败回地球，我成了全球唯一仙",
+  "episodeCount": 60,
+  "charsPerEpisode": 1082,
+  "status": "completed",
+  "phase": "done",
+  "filledEpisodes": 60,
+  "units": 60,
+  "audit": {
+    "errors": 0,
+    "warnings": 0,
+    "avgChars": 1082,
+    "minChars": 912,
+    "maxChars": 1515,
+    "result": "passed",
+    "polish": "v002"
+  },
+  "completedAt": "2026-09-15T09:42:16.641Z",
+  "updatedAt": "2026-09-15T09:55:00.000Z"
+}

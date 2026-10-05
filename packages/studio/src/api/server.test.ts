@@ -111,7 +111,7 @@ const endpointIdsByGroup = {
     "minimax", "moonshot", "sensenova", "spark", "stepfun", "tencentcloud",
     "volcengine", "wenxin", "xiaomimimo", "zeroone", "zhipu",
   ],
-  aggregator: ["kkaiapi", "openrouter", "newapi", "siliconcloud"],
+  aggregator: ["modelscope", "kkaiapi", "openrouter", "newapi", "siliconcloud"],
   local: ["githubCopilot", "ollama"],
   codingPlan: [
     "astronCodingPlan", "bailianCodingPlan", "glmCodingPlan", "kimiCodingPlan", "kimicode",
@@ -1026,14 +1026,14 @@ describe("createStudioServer daemon lifecycle", () => {
     expect(res.status).toBe(200);
     const body = await res.json() as { services: Array<{ service: string; group?: string; connected: boolean }> };
     const bank = body.services.filter((s) => !s.service.startsWith("custom"));
-    expect(bank.length).toBe(37);
+    expect(bank.length).toBe(38);
     expect(bank.every((s) => typeof s.group === "string")).toBe(true);
     expect(bank.filter((s) => s.group === "overseas")).toHaveLength(5);
     expect(bank.filter((s) => s.group === "china")).toHaveLength(18);
-    expect(bank.filter((s) => s.group === "aggregator")).toHaveLength(4);
+    expect(bank.filter((s) => s.group === "aggregator")).toHaveLength(5);
     expect(bank.filter((s) => s.group === "local")).toHaveLength(2);
     expect(bank.filter((s) => s.group === "codingPlan")).toHaveLength(8);
-    expect(bank.filter((s) => s.group === "aggregator").map((s) => s.service)[0]).toBe("kkaiapi");
+    expect(bank.filter((s) => s.group === "aggregator").map((s) => s.service)[0]).toBe("modelscope");
     expect(body.services.find((s) => s.service === "moonshot")?.connected).toBe(true);
     expect(body.services.find((s) => s.service === "custom:内网GPT")).toMatchObject({
       connected: true,
@@ -1923,9 +1923,9 @@ describe("createStudioServer daemon lifecycle", () => {
     const kkaiapiEndpoint = endpointMocks.find((ep) => ep.id === "kkaiapi");
     if (kkaiapiEndpoint) {
       Object.assign(kkaiapiEndpoint, {
-        checkModel: "deepseek-v4-flash",
+        checkModel: "kkaiapi/deepseek-v4-flash",
         models: [
-          { id: "deepseek-v4-flash", maxOutput: 4096, contextWindowTokens: 32768, enabled: true },
+          { id: "kkaiapi/deepseek-v4-flash", deploymentName: "deepseek-v4-flash", maxOutput: 4096, contextWindowTokens: 32768, enabled: true },
           { id: "gpt-image-2", maxOutput: 1, contextWindowTokens: 1, enabled: false },
         ],
       });
@@ -1948,11 +1948,11 @@ describe("createStudioServer daemon lifecycle", () => {
     expect(chatCompletionMock).not.toHaveBeenCalled();
     await expect(response.json()).resolves.toMatchObject({
       ok: true,
-      selectedModel: "deepseek-v4-flash",
+      selectedModel: "kkaiapi/deepseek-v4-flash",
       detected: {
         modelsSource: "fallback",
       },
-      models: [{ id: "deepseek-v4-flash", name: "deepseek-v4-flash" }],
+      models: [{ id: "kkaiapi/deepseek-v4-flash", name: "kkaiapi/deepseek-v4-flash" }],
     });
   });
 
@@ -2913,7 +2913,7 @@ describe("createStudioServer daemon lifecycle", () => {
         actionPayload: {
           shortRun: {
             direction: "an office suspense story about forged expense records",
-            chapters: 12,
+            chapters: 50,
             cover: false,
           },
         },
@@ -3165,7 +3165,7 @@ describe("createStudioServer daemon lifecycle", () => {
         sessionKind: "short",
         actionSource: "button",
         requestedIntent: "short_run",
-        actionPayload: { shortRun: { direction: "雨夜档案馆悬疑", chapters: 12, cover: false } },
+        actionPayload: { shortRun: { direction: "雨夜档案馆悬疑", chapters: 50, cover: false } },
       }),
     });
     await vi.waitFor(async () => {
@@ -3221,7 +3221,7 @@ describe("createStudioServer daemon lifecycle", () => {
         sessionKind: "short",
         actionSource: "button",
         requestedIntent: "short_run",
-        actionPayload: { shortRun: { direction: "雨夜档案馆悬疑", chapters: 12, cover: false } },
+        actionPayload: { shortRun: { direction: "雨夜档案馆悬疑", chapters: 50, cover: false } },
       }),
     });
     await vi.waitFor(async () => {
@@ -3290,7 +3290,7 @@ describe("createStudioServer daemon lifecycle", () => {
         sessionKind: "short",
         actionSource: "button",
         requestedIntent: "short_run",
-        actionPayload: { shortRun: { direction: "会失败的短篇", chapters: 12, cover: false } },
+        actionPayload: { shortRun: { direction: "会失败的短篇", chapters: 50, cover: false } },
       }),
     });
 

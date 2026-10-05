@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Check, Eye, EyeOff, Loader2, Plus, Search, X } from "lucide-react";
 import { GROUP_ORDER, getGroupDescription, getGroupLabel, getGroupShortLabel } from "../constants/service-groups";
+import { isStudioPickerService } from "../lib/studio-model-picker";
 import { tr } from "../lib/app-language";
 import { fetchJson } from "../hooks/use-api";
 import { useServiceStore } from "../store/service";
@@ -249,11 +250,7 @@ export function ServiceListPage({ nav }: { nav: Nav }) {
   const [onlyConnected, setOnlyConnected] = useState(false);
 
   const bankServices = useMemo(
-    () => services.filter((s) => !s.service.startsWith("custom")),
-    [services],
-  );
-  const customServices = useMemo(
-    () => services.filter((s) => s.service.startsWith("custom")),
+    () => services.filter((s) => isStudioPickerService(s.service)),
     [services],
   );
 
@@ -266,8 +263,8 @@ export function ServiceListPage({ nav }: { nav: Nav }) {
   }, [bankServices]);
 
   const connectedCount = useMemo(
-    () => services.filter((s) => s.connected).length,
-    [services],
+    () => bankServices.filter((s) => s.connected).length,
+    [bankServices],
   );
 
   const filtered = useMemo(() => {
@@ -280,15 +277,7 @@ export function ServiceListPage({ nav }: { nav: Nav }) {
     });
   }, [bankServices, onlyConnected, query, selectedGroups]);
 
-  const filteredCustom = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    if (selectedGroups.size > 0) return [];
-    return customServices.filter((svc) => {
-      if (onlyConnected && !svc.connected) return false;
-      if (q && !svc.label.toLowerCase().includes(q) && !svc.service.toLowerCase().includes(q)) return false;
-      return true;
-    });
-  }, [customServices, onlyConnected, query, selectedGroups]);
+  const filteredCustom: typeof services = [];
 
   const byGroup = useMemo(() => {
     const map = {} as Record<EndpointGroup, ServiceInfo[]>;
@@ -308,7 +297,7 @@ export function ServiceListPage({ nav }: { nav: Nav }) {
     });
   };
 
-  const canCreateCustom = selectedGroups.size === 0 && query.trim() === "" && !onlyConnected;
+  const canCreateCustom = false;
   const showCustomSection = !loading && selectedGroups.size === 0 && (filteredCustom.length > 0 || canCreateCustom);
 
   return (

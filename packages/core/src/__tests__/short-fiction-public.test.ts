@@ -12,6 +12,7 @@ import { saveSecrets } from "../llm/secrets.js";
 import {
   extractGeminiImageBase64,
   extractImagesGenerationImage,
+  buildImagesGenerationBody,
   generateShortFictionCover,
   resolveCoverGenerationRequest,
 } from "../pipeline/short-fiction-runner.js";
@@ -121,7 +122,7 @@ describe("public short-fiction chain", () => {
       draft: firstDraft,
       review: "时间线不成立，第二天不能先收到律师函再补证据。",
       chapterCount: 1,
-      charsPerChapter: 1000,
+      charsPerChapter: 2000,
     });
 
     const messages = chatSpy.mock.calls[0]?.[0] as ReadonlyArray<{ role: string; content: string }>;
@@ -179,6 +180,22 @@ describe("public short-fiction chain", () => {
     expect(extractImagesGenerationImage({
       data: [{ b64_json: "ZmFrZQ==" }],
     })).toEqual({ base64: "ZmFrZQ==", extension: "png" });
+  });
+
+  it("builds Agnes image payloads with extra_body.response_format", () => {
+    expect(buildImagesGenerationBody("agnes-image-2.1-flash", "cover", "1024x1360")).toEqual({
+      model: "agnes-image-2.1-flash",
+      prompt: "cover",
+      n: 1,
+      size: "1024x1360",
+      extra_body: { response_format: "url" },
+    });
+    expect(buildImagesGenerationBody("gpt-image-2", "cover", "1024x1360")).toEqual({
+      model: "gpt-image-2",
+      prompt: "cover",
+      n: 1,
+      size: "1024x1360",
+    });
   });
 
   it("extracts Gemini inline image data from generateContent responses", () => {

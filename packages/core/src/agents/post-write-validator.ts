@@ -298,6 +298,219 @@ export function validatePostWrite(
   const personViolation = detectNarrativePersonDrift(content, bookRules);
   if (personViolation) violations.push(personViolation);
 
+  // 13. Referent-count consistency: 「血祭司」两字 / 血祭司。两字在识海…
+  violations.push(...detectReferentCountMismatches(content));
+
+  return violations;
+}
+
+const CN_COUNT_WORDS: Readonly<Record<string, number>> = {
+  一: 1,
+  壹: 1,
+  二: 2,
+  两: 2,
+  俩: 2,
+  贰: 2,
+  三: 3,
+  叁: 3,
+  四: 4,
+  肆: 4,
+  五: 5,
+  伍: 5,
+  六: 6,
+  陆: 6,
+  七: 7,
+  柒: 7,
+  八: 8,
+  捌: 8,
+  九: 9,
+  玖: 9,
+  十: 10,
+  拾: 10,
+};
+
+function parseCountWord(raw: string): number | null {
+  if (/^\d{1,2}$/.test(raw)) {
+    const n = Number(raw);
+    return n >= 1 && n <= 20 ? n : null;
+  }
+  return CN_COUNT_WORDS[raw] ?? null;
+}
+
+/** Count units a Chinese "N字" claim should match. */
+export function countReferentUnits(referent: string): number {
+  const cjk = referent.match(/[\u4e00-\u9fff]/gu);
+  if (cjk && cjk.length > 0) return cjk.length;
+  const letters = referent.replace(/[\s\p{P}]/gu, "");
+  return [...letters].length;
+}
+
+/**
+ * Deterministic detector for local referent-count slips:
+ * - quoted term + N字 / N个字 (adjacent either order)
+ * - delayed anaphora (延后): quote earlier → later 「把两字 / 这三字…」
+ * - cataphora (延前): 「两字…」 earlier → later quote reveals the term
+ * - name before sentence end + N字 + cognitive reaction (识海/脑海…)
+ * -顿号名单 + N人
+ */
+export function detectReferentCountMismatches(
+  content: string,
+): ReadonlyArray<PostWriteViolation> {
+  const violations: PostWriteViolation[] = [];
+  const seen = new Set<string>();
+
+  const pushMismatch = (
+    referent: string,
+    claimed: number,
+    actual: number,
+    snippet: string,
+    kind: "字" | "人",
+  ): void => {
+    const key = `${kind}:${referent}:${claimed}:${actual}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    const unit = kind === "字" ? "字" : "人";
+    const cleanRef = referent.replace(/[…·.。]+$/u, "").trim() || referent;
+    violations.push({
+      rule: "指称数量",
+      severity: "error",
+      description: `指称数量不一致：附近对象「${cleanRef}」实际为${actual}${unit}，却写成「${claimed}${unit}」（片段：${snippet}）`,
+      suggestion:
+        kind === "字"
+          ? `把数量改成「${actual}字」，或改写指称对象，使字数与说法一致`
+          : `把人数改成「${actual}人」，或调整名单，使人数与说法一致`,
+    });
+  };
+
+  // Count word: longer arabic forms first so "10" is not eaten as "1"
+  const countAlt =
+    "20|1[0-9]|[1-9]|两|二|俩|三|四|五|六|七|八|九|十|壹|贰|叁|肆|伍|陆|柒|捌|玖|拾|一";
+  // ASCII + curly + corner quotes
+  const qOpen = `[「『“"]`;
+  const qClose = `[」』”"]`;
+  const quoteRe = () => new RegExp(`${qOpen}([^」』”"'\\n]{1,20}?)${qClose}`, "g");
+
+  // 1a) 「称谓」两字
+  const quotedThenZi = new RegExp(
+    `${qOpen}([^」』”"'\\n]{1,16})${qClose}\\s*[，,]?\\s*(?:这|那)?\\s*(${countAlt})\\s*个?\\s*字`,
+    "g",
+  );
+  for (const match of content.matchAll(quotedThenZi)) {
+    const referent = match[1]?.trim() ?? "";
+    const claimed = parseCountWord(match[2] ?? "");
+    if (!referent || claimed === null) continue;
+    const actual = countReferentUnits(referent);
+    if (actual > 0 && actual !== claimed) {
+      pushMismatch(referent, claimed, actual, match[0], "字");
+    }
+  }
+
+  // 1b) 两字「称谓」 / 那三个字——“弑神者”
+  const ziThenQuoted = new RegExp(
+    `(?:这|那|把|将)?(${countAlt})\\s*个?\\s*字\\s*[，,：:——\\-]*\\s*${qOpen}([^」』”"'\\n]{1,16})${qClose}`,
+    "g",
+  );
+  for (const match of content.matchAll(ziThenQuoted)) {
+    const claimed = parseCountWord(match[1] ?? "");
+    const referent = match[2]?.trim() ?? "";
+    if (!referent || claimed === null) continue;
+    const actual = countReferentUnits(referent);
+    if (actual > 0 && actual !== claimed) {
+      pushMismatch(referent, claimed, actual, match[0], "字");
+    }
+  }
+
+  // 2) Non-adjacent: 延后 (look back) + 延前 (look ahead). Pick nearer quote.
+  // Cue required so ordinary compounds like 十字路口 are not scanned.
+  const LINK_WINDOW = 180;
+  const linkedZi = new RegExp(
+    `(?:(?:把|将|这|那)(${countAlt})\\s*个?\\s*字|(${countAlt})\\s*个?\\s*字(?:刻|炸开|闪过|浮现|回响|脱口|砸下|蹦出|滚过|掠过|响起|出口|念出|更深|在识海|在脑海|在心中|在心里))`,
+    "g",
+  );
+  for (const match of content.matchAll(linkedZi)) {
+    const claimed = parseCountWord(match[1] ?? match[2] ?? "");
+    const idx = match.index ?? 0;
+    const end = idx + match[0].length;
+    if (claimed === null) continue;
+
+    // Adjacent quote→N字 already covered by 1a
+    if (/[」』”"]\s*$/.test(content.slice(Math.max(0, idx - 2), idx))) continue;
+    // Adjacent N字→quote already covered by 1b
+    if (new RegExp(`^\\s*[，,：:——\\-]*\\s*${qOpen}`).test(content.slice(end, end + 8))) continue;
+
+    type Cand = { referent: string; gap: number; from: number; to: number };
+    let best: Cand | null = null;
+
+    const beforeStart = Math.max(0, idx - LINK_WINDOW);
+    const before = content.slice(beforeStart, idx);
+    for (const q of before.matchAll(quoteRe())) {
+      const qIdx = q.index ?? 0;
+      const qEnd = qIdx + q[0].length;
+      const gap = before.length - qEnd;
+      if (gap < 4) continue;
+      const cand: Cand = {
+        referent: (q[1] ?? "").trim(),
+        gap,
+        from: beforeStart + qIdx,
+        to: end,
+      };
+      if (!best || cand.gap < best.gap) best = cand;
+    }
+
+    const after = content.slice(end, end + LINK_WINDOW);
+    for (const q of after.matchAll(quoteRe())) {
+      const qIdx = q.index ?? 0;
+      const gap = qIdx;
+      if (gap < 2) continue;
+      const cand: Cand = {
+        referent: (q[1] ?? "").trim(),
+        gap,
+        from: idx,
+        to: end + qIdx + q[0].length,
+      };
+      if (!best || cand.gap < best.gap) best = cand;
+    }
+
+    if (!best?.referent) continue;
+    const actual = countReferentUnits(best.referent);
+    if (actual > 0 && actual !== claimed) {
+      const snippet = content.slice(best.from, best.to).replace(/\s+/g, "");
+      const short = snippet.length > 36 ? `${snippet.slice(0, 35)}…` : snippet;
+      pushMismatch(best.referent, claimed, actual, short, "字");
+    }
+  }
+
+  // 3) 称谓。两字在识海炸开 — require a cognitive/linguistic reaction cue
+  const bareZi = new RegExp(
+    `([\\u4e00-\\u9fff]{2,8})([。！？；…])\\s*(${countAlt})\\s*个?\\s*字(?:在|于)(?:脑中|脑海|识海|心中|心里|唇边|口中|耳边|舌尖)`,
+    "g",
+  );
+  for (const match of content.matchAll(bareZi)) {
+    const referent = match[1] ?? "";
+    const claimed = parseCountWord(match[3] ?? "");
+    if (!referent || claimed === null) continue;
+    const actual = countReferentUnits(referent);
+    if (actual > 0 && actual !== claimed) {
+      pushMismatch(referent, claimed, actual, match[0], "字");
+    }
+  }
+
+  // 4) 张三、李四、王五两人
+  const nameListRen = new RegExp(
+    `([\\u4e00-\\u9fff]{2,4}(?:[、，,][\\u4e00-\\u9fff]{2,4}){1,9})\\s*(${countAlt})\\s*人`,
+    "g",
+  );
+  for (const match of content.matchAll(nameListRen)) {
+    const list = match[1] ?? "";
+    const claimed = parseCountWord(match[2] ?? "");
+    if (!list || claimed === null) continue;
+    const names = list.split(/[、，,]/).map((s) => s.trim()).filter(Boolean);
+    const actual = names.length;
+    if (actual >= 2 && actual !== claimed) {
+      pushMismatch(list, claimed, actual, match[0], "人");
+    }
+  }
+
   return violations;
 }
 

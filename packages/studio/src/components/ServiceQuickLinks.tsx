@@ -14,6 +14,14 @@ const SERVICE_QUICK_LINKS: Record<string, ReadonlyArray<{ zh: string; en: string
   kimiCodingPlan: [
     { zh: "官网", en: "Website", href: "https://www.kimi.com?aff=inkos" },
   ],
+  modelscope: [
+    { zh: "控制台 / Token（配代理）", en: "Console / Token (for proxy)", href: "https://www.modelscope.cn/my/myaccesstoken" },
+    { zh: "API 文档", en: "API docs", href: "https://www.modelscope.cn/docs/model-service/API-Inference/intro" },
+  ],
+  agnes: [
+    { zh: "API 平台", en: "API Platform", href: "https://platform.agnes-ai.com/" },
+    { zh: "文档", en: "Docs", href: "https://agnes-ai.com/doc/overview" },
+  ],
   kkaiapi: [
     { zh: "官网", en: "Website", href: "https://kkaiapi.com/" },
     { zh: "API 文档", en: "API docs", href: "https://kkaiapi.com/docs" },
@@ -24,7 +32,7 @@ const SERVICE_QUICK_LINKS: Record<string, ReadonlyArray<{ zh: string; en: string
   ],
   openrouter: [
     { zh: "API Keys", en: "API Keys", href: "https://openrouter.ai/keys" },
-    { zh: "模型", en: "Models", href: "https://openrouter.ai/models" },
+    { zh: "模型", en: "Models", href: "https://openrouter.ai/models?q=free" },
     { zh: "文档", en: "Docs", href: "https://openrouter.ai/docs/api-reference/overview" },
   ],
 };

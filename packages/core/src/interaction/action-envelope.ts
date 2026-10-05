@@ -4,7 +4,9 @@ import { StoryNodeSchema } from "../interactive-film/graph-schema.js";
 import {
   SHORT_FICTION_EN_MAX_WORDS_PER_CHAPTER,
   SHORT_FICTION_EN_MIN_WORDS_PER_CHAPTER,
+  SHORT_FICTION_MAX_CHAPTERS,
   SHORT_FICTION_MAX_CHARS_PER_CHAPTER,
+  SHORT_FICTION_MIN_CHAPTERS,
   SHORT_FICTION_MIN_CHARS_PER_CHAPTER,
 } from "../agents/short-fiction.js";
 
@@ -47,7 +49,7 @@ export const CreateBookActionPayloadSchema = z.object({
   chapterWordCount: z.number().int().min(1).optional(),
 }).strict();
 
-// charsPerChapter 的单位随语言变化：zh 是每章汉字数（900-1200），en 是每章英文单词数（600-800）。
+// charsPerChapter 的单位随语言变化：zh 是每章汉字数（1800-2200），en 是每章英文单词数（1200-1500）。
 // 这两个区间与 short-fiction-runner 的执行层校验共用同一组常量，保证确认卡和执行层不再各说各话。
 export function shortRunCharsPerChapterRange(language: "zh" | "en"): {
   readonly min: number;
@@ -67,16 +69,19 @@ export function shortRunCharsPerChapterError(value: number, language: "zh" | "en
       + `charsPerChapter=${value} is outside the valid range for Chinese shorts (${min}-${max} characters per chapter).`;
 }
 
-// language 与 charsPerChapter 同时存在时按语言分段校验，让非法组合（如 en+1100）
+// language 与 charsPerChapter 同时存在时按语言分段校验，让非法组合（如 en+2000）
 // 在确认卡阶段就被拒绝，而不是任务开跑后才在 runner 里抛错；language 缺省时维持
-// 600-1200 并集（此时最终语言由会话默认决定，envelope 层无法预知）。
+// 英/中并集（此时最终语言由会话默认决定，envelope 层无法预知）。
 export const ShortRunActionPayloadSchema = z.object({
   direction: z.string().min(1).optional(),
   reference: z.string().min(1).optional(),
   storyId: z.string().min(1).optional(),
   language: z.enum(["zh", "en"]).optional(),
-  chapters: z.number().int().min(12).max(18).optional(),
-  charsPerChapter: z.number().int().min(600).max(1200).optional(),
+  chapters: z.number().int().min(SHORT_FICTION_MIN_CHAPTERS).max(SHORT_FICTION_MAX_CHAPTERS).optional(),
+  charsPerChapter: z.number().int()
+    .min(SHORT_FICTION_EN_MIN_WORDS_PER_CHAPTER)
+    .max(SHORT_FICTION_MAX_CHARS_PER_CHAPTER)
+    .optional(),
   cover: z.boolean().optional(),
 }).strict().superRefine((payload, ctx) => {
   if (payload.language === undefined || payload.charsPerChapter === undefined) return;

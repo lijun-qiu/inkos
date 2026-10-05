@@ -434,7 +434,7 @@ export {
 export * from "./agent/index.js";
 
 // LLM
-export { createLLMClient, chatCompletion, createStreamMonitor, PartialResponseError, type LLMClient, type LLMResponse, type LLMMessage, type StreamProgress, type OnStreamProgress, type OnThinkingDelta } from "./llm/provider.js";
+export { createLLMClient, chatCompletion, createStreamMonitor, PartialResponseError, type LLMClient, type CreateLLMClientConfig, type LLMResponse, type LLMMessage, type StreamProgress, type OnStreamProgress, type OnThinkingDelta } from "./llm/provider.js";
 export {
   SERVICE_PRESETS,
   SERVICE_TO_PI_PROVIDER,
@@ -449,7 +449,17 @@ export {
   type ModelInfo,
 } from "./llm/service-presets.js";
 export { resolveServiceModel, type ResolvedModel } from "./llm/service-resolver.js";
-export { loadSecrets, saveSecrets, getServiceApiKey, type SecretsFile } from "./llm/secrets.js";
+export {
+  loadSecrets,
+  saveSecrets,
+  getServiceApiKey,
+  upsertServiceSecret,
+  resolveActiveServiceApiKey,
+  normalizeServiceSecret,
+  type SecretsFile,
+  type ServiceSecret,
+  type ServiceApiKeyEntry,
+} from "./llm/secrets.js";
 export {
   COVER_PROVIDER_PRESETS,
   coverSecretKey,
@@ -459,6 +469,7 @@ export {
 } from "./llm/cover-providers.js";
 export { migrateConfig, type MigrationResult } from "./llm/config-migration.js";
 export { getAllEndpoints, getEndpoint, type InkosEndpoint, type InkosModel, type EndpointGroup } from "./llm/providers/index.js";
+export { isOpenRouterFreeModel } from "./llm/providers/endpoints/openrouter.js";
 export { probeModelsFromUpstream, type ProbedModel } from "./llm/providers/probe.js";
 
 // Agents
@@ -534,11 +545,25 @@ export { arbitrateRuntimeStateDeltaHooks, type HookArbiterDecision } from "./uti
 export { analyzeHookHealth } from "./utils/hook-health.js";
 
 // Pipeline
-export { PipelineRunner, type PipelineConfig, type ChapterPipelineResult, type DraftResult, type PlanChapterResult, type ComposeChapterResult, type ReviseResult, type TruthFiles, type BookStatusInfo, type ImportChaptersInput, type ImportChaptersResult, type TokenUsageSummary } from "./pipeline/runner.js";
+export { PipelineRunner, type PipelineConfig, type ChapterPipelineResult, type DraftResult, type PlanChapterResult, type ComposeChapterResult, type ReviseResult, type ReviseDraftOptions, type ReviseIssueScope, type TruthFiles, type BookStatusInfo, type ImportChaptersInput, type ImportChaptersResult, type TokenUsageSummary } from "./pipeline/runner.js";
 export { Scheduler, type SchedulerConfig } from "./pipeline/scheduler.js";
 export { detectChapter, detectAndRewrite, loadDetectionHistory, type DetectChapterResult, type DetectAndRewriteResult } from "./pipeline/detection-runner.js";
 export { runScriptCreation, runStoryboardCreation, runInteractiveFilmCreation, createStoryboardAssetsManifest, type ScriptCreationRunOptions, type ScriptCreationRunResult, type StoryboardAssetsManifest, type StoryboardCreationRunOptions, type StoryboardCreationRunResult, type InteractiveFilmCreationRunOptions, type InteractiveFilmCreationRunResult, type StoryboardImageAsset, type StoryboardImageAssetVariant } from "./pipeline/script-storyboard-runner.js";
 export { ScriptCreationAgent, StoryboardCreationAgent, InteractiveFilmCreationAgent, renderScriptSpec, renderStoryboardSpec, renderInteractiveFilmSpec, type ScriptCreationInput, type ScriptTargetFormat, type StoryboardCreationInput, type InteractiveFilmCreationInput } from "./agents/script-storyboard.js";
+export {
+  SCRIPT_DEFAULT_CHARS_PER_EPISODE,
+  SCRIPT_DEFAULT_EPISODES,
+  SCRIPT_EPISODE_WAVE_SIZE,
+  SCRIPT_MAX_EPISODES,
+  ScriptEpisodePipelineAgent,
+  assembleScriptMarkdown,
+  findEmptyScriptEpisodes,
+  parseScriptBatchDraft,
+  resolveScriptEpisodePlan,
+  validateScriptDraftForFinal,
+  type ScriptBatchDraft,
+  type ScriptEpisodePlan,
+} from "./agents/script-episode.js";
 
 // State
 export { BookWriteLockError, StateManager } from "./state/manager.js";

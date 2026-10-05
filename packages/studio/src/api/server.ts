@@ -34,9 +34,11 @@ import {
   resolveServiceModel,
   loadSecrets,
   saveSecrets,
+  upsertServiceSecret,
   listModelsForService,
   isApiKeyOptionalForEndpoint,
   getAllEndpoints,
+  isOpenRouterFreeModel,
   probeModelsFromUpstream,
   fetchWithProxy,
   chatCompletion,
@@ -281,13 +283,20 @@ function compareServiceListItems(
   left: { readonly service: string },
   right: { readonly service: string },
 ): number {
-  const priority = ["kkaiapi", "openrouter", "newapi", "siliconcloud"];
+  const priority = ["agnes", "modelscope", "deepseek", "openrouter"];
   const leftPriority = priority.indexOf(left.service);
   const rightPriority = priority.indexOf(right.service);
   if (leftPriority !== -1 || rightPriority !== -1) {
     return (leftPriority === -1 ? 999 : leftPriority) - (rightPriority === -1 ? 999 : rightPriority);
   }
   return 0;
+}
+
+/** Match getServiceApiKey env fallback: MODELSCOPE_API_KEY, DEEPSEEK_API_KEY, etc. */
+function readEnvServiceApiKey(service: string): string | undefined {
+  const envKey = `${service.replace(/[^a-zA-Z0-9]/g, "_").toUpperCase()}_API_KEY`;
+  const value = process.env[envKey]?.trim();
+  return value || undefined;
 }
 
 async function buildTarArchive(sourceDir: string, packageRootName: string): Promise<Buffer> {
@@ -2186,18 +2195,22 @@ async function readEffectiveEnvConfigValues(root: string): Promise<{ source: "pr
 async function resolveConfiguredServiceBaseUrl(root: string, serviceId: string, inlineBaseUrl?: string): Promise<string | undefined> {
   if (inlineBaseUrl?.trim()) return inlineBaseUrl.trim();
 
-  if (!isCustomServiceId(serviceId)) {
-    return resolveServicePreset(serviceId)?.baseUrl;
-  }
-
+  // Prefer per-service baseUrl from inkos.json (e.g. openrouter → :9999, modelscope → :10001)
+  // before falling back to the bank preset URL (ModelScope preset is the local injector proxy).
   try {
     const config = await loadRawConfig(root);
     const services = normalizeServiceConfig((config.llm as Record<string, unknown> | undefined)?.services);
     const matched = services.find((entry) => serviceConfigKey(entry) === serviceId);
-    return matched?.baseUrl;
+    if (matched?.baseUrl?.trim()) return matched.baseUrl.trim();
   } catch {
-    return undefined;
+    // no config file yet
   }
+
+  if (!isCustomServiceId(serviceId)) {
+    return resolveServicePreset(serviceId)?.baseUrl;
+  }
+
+  return undefined;
 }
 
 async function resolveConfiguredServiceEntry(root: string, serviceId: string): Promise<ServiceConfigEntry | undefined> {
@@ -2647,7 +2660,8 @@ async function probeServiceCapabilities(args: {
         proxyUrl: args.proxyUrl,
         apiFormat: plan.apiFormat,
         stream: plan.stream,
-      } as ProjectConfig["llm"]);
+        projectRoot: root,
+      } as ProjectConfig["llm"] & { projectRoot?: string });
 
       try {
         await withTimeout(
@@ -2903,12 +2917,12 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
       : sseSink;
     const logger = createLogger({ tag: "studio", sinks: [scopedSseSink, consoleSink] });
     return {
-      client: overrides?.client ?? createLLMClient(currentConfig.llm),
+      client: overrides?.client ?? createLLMClient({ ...currentConfig.llm, projectRoot: root }),
       model: overrides?.model ?? currentConfig.llm.model,
       projectRoot: root,
       defaultLLMConfig: currentConfig.llm,
       foundationReviewRetries: currentConfig.foundation?.reviewRetries ?? 2,
-      writingReviewRetries: currentConfig.writing?.reviewRetries ?? 5,
+      writingReviewRetries: currentConfig.writing?.reviewRetries ?? 8,
       chapterReviewMode,
       revisionGate,
       modelOverrides: currentConfig.modelOverrides,
@@ -3477,7 +3491,10 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
     } catch { /* no config file yet */ }
 
     const isServiceConnected = (serviceId: string, baseUrl: string | undefined): boolean => {
-      const hasKey = Boolean(secrets.services[serviceId]?.apiKey?.trim());
+      const hasKey = Boolean(
+        secrets.services[serviceId]?.apiKey?.trim()
+        || readEnvServiceApiKey(serviceId),
+      );
       if (hasKey) return true;
       if (!configuredServiceKeys.has(serviceId)) return false;
       return isApiKeyOptionalForEndpoint({
@@ -3486,7 +3503,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
       });
     };
 
-    // Fast: connection status from secrets + local optional-key config, no external API calls.
+    // Fast: connection status from secrets/env + local optional-key config, no external API calls.
     const services = endpoints.map((ep) => ({
       service: ep.id,
       label: ep.label,
@@ -3621,7 +3638,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
     // for the Play auto-illustration toggles.
     const envConfigured = Boolean(
       (process.env.INKOS_COVER_BASE_URL || process.env.INKOS_COVER_ENDPOINT)
-      && (process.env.INKOS_COVER_API_KEY || keyFor("kkaiapi")),
+      && (process.env.INKOS_COVER_API_KEY || keyFor("agnes") || keyFor("kkaiapi")),
     );
     const configured = Boolean(cover?.service && keyFor(cover.service)) || envConfigured;
     return c.json({
@@ -3799,40 +3816,86 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
 
   app.put("/api/v1/services/:service/secret", async (c) => {
     const service = c.req.param("service");
-    const { apiKey } = await c.req.json<{ apiKey: string }>();
-    const secrets = await loadSecrets(root);
-    const trimmedKey = apiKey?.trim() ?? "";
-    if (trimmedKey) {
-      if (!isHeaderSafeApiKey(trimmedKey)) {
-        return c.json({
-          ok: false,
-          error: pick(
-            await currentProjectLanguage(),
-            "API Key 只能包含可放进 HTTP Authorization header 的非空白 ASCII 字符；请不要粘贴连接失败提示或诊断文本。",
-            "API Key may only contain non-whitespace ASCII characters that fit in an HTTP Authorization header; do not paste connection failure hints or diagnostic text.",
-          ),
-        }, 400);
-      }
-      secrets.services[service] = { apiKey: trimmedKey };
-    } else {
-      delete secrets.services[service];
+    const body = await c.req.json<{
+      apiKey?: string;
+      apiKeys?: Array<{ key?: string; label?: string }>;
+    }>();
+    const trimmedKey = body.apiKey?.trim() ?? "";
+    const hasPoolPatch = Array.isArray(body.apiKeys);
+    if (trimmedKey && !isHeaderSafeApiKey(trimmedKey)) {
+      return c.json({
+        ok: false,
+        error: pick(
+          await currentProjectLanguage(),
+          "API Key 只能包含可放进 HTTP Authorization header 的非空白 ASCII 字符；请不要粘贴连接失败提示或诊断文本。",
+          "API Key may only contain non-whitespace ASCII characters that fit in an HTTP Authorization header; do not paste connection failure hints or diagnostic text.",
+        ),
+      }, 400);
     }
-    await saveSecrets(root, secrets);
+    if (hasPoolPatch) {
+      for (const entry of body.apiKeys ?? []) {
+        const key = entry.key?.trim() ?? "";
+        if (key && !isHeaderSafeApiKey(key)) {
+          return c.json({
+            ok: false,
+            error: pick(
+              await currentProjectLanguage(),
+              "密钥池中的 Key 只能包含可放进 HTTP Authorization header 的非空白 ASCII 字符。",
+              "Each key in the pool may only contain non-whitespace ASCII characters that fit in an HTTP Authorization header.",
+            ),
+          }, 400);
+        }
+      }
+    }
+
+    if (!trimmedKey && !hasPoolPatch) {
+      await upsertServiceSecret(root, service, { clear: true });
+      return c.json({ ok: true });
+    }
+
+    await upsertServiceSecret(root, service, {
+      ...(typeof body.apiKey === "string" ? { apiKey: trimmedKey } : {}),
+      ...(hasPoolPatch
+        ? {
+            apiKeys: (body.apiKeys ?? [])
+              .map((entry) => ({
+                key: String(entry.key ?? "").trim(),
+                ...(typeof entry.label === "string" && entry.label.trim()
+                  ? { label: entry.label.trim() }
+                  : {}),
+              }))
+              .filter((entry) => entry.key.length > 0),
+          }
+        : {}),
+    });
     return c.json({ ok: true });
   });
 
   app.get("/api/v1/services/:service/secret", async (c) => {
     const service = c.req.param("service");
     const secrets = await loadSecrets(root);
+    const entry = secrets.services[service];
     return c.json({
-      apiKey: secrets.services[service]?.apiKey ?? "",
+      apiKey: entry?.apiKey ?? "",
+      ...(entry?.apiKeys?.length
+        ? {
+            apiKeys: entry.apiKeys.map((item) => ({
+              key: item.key,
+              ...(item.label ? { label: item.label } : {}),
+            })),
+          }
+        : {}),
     });
   });
 
   app.get("/api/v1/services/models", async (c) => {
     const secrets = await loadSecrets(root);
     const endpoints = getAllEndpoints()
-      .filter((ep) => ep.id !== "custom" && Boolean(secrets.services[ep.id]?.apiKey));
+      .filter((ep) => ep.id !== "custom")
+      .filter((ep) => Boolean(
+        secrets.services[ep.id]?.apiKey?.trim()
+        || readEnvServiceApiKey(ep.id),
+      ));
 
     const groups = endpoints.map((ep) => ({
       service: ep.id,
@@ -3840,6 +3903,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
       models: ep.models
         .filter((m) => m.enabled !== false)
         .filter((m) => isTextChatModelId(m.id))
+        .filter((m) => ep.id !== "openrouter" || isOpenRouterFreeModel(m.id))
         .map((m) => ({
           id: m.id,
           name: m.id,
@@ -4603,7 +4667,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
     try {
       // Load config + create LLM client (pipeline created after model resolution)
       const config = await loadCurrentProjectConfig({ requireApiKey: false });
-      const client = createLLMClient(config.llm);
+      const client = createLLMClient({ ...config.llm, projectRoot: root });
 
       const loadedBookSession = await loadBookSession(root, sessionId);
       if (!loadedBookSession) {
@@ -4724,7 +4788,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
             reqService,
             reqModel,
             root,
-            await resolveConfiguredServiceBaseUrl(root, reqService),
+            await resolveConfiguredServiceBaseUrl(root, reqService, configuredEntry?.baseUrl),
             configuredEntry?.apiFormat,
           );
           resolvedModel = resolved.model;
@@ -4780,7 +4844,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
                   svcName,
                   textModels[0].id,
                   root,
-                  await resolveConfiguredServiceBaseUrl(root, svcName),
+                  await resolveConfiguredServiceBaseUrl(root, svcName, configuredEntry?.baseUrl),
                   configuredEntry?.apiFormat,
                 );
                 resolvedModel = resolved.model;
@@ -4806,16 +4870,20 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
 
       // Create pipeline with resolved model (so sub_agent tools use the frontend-selected model)
       // Don't spread config.llm — its baseUrl/provider belong to the old service.
-      // Let createLLMClient resolve baseUrl from the service preset.
+      // Prefer per-service baseUrl from inkos.json (local proxy) over bank preset.
+      const pipelineBaseUrl = configuredEntry?.baseUrl?.trim()
+        || (await resolveConfiguredServiceBaseUrl(root, reqService ?? ""))
+        || "";
       const pipelineClient = (reqService && reqModel && resolvedModel)
         ? createLLMClient({
             ...config.llm,
             service: configuredEntry?.service ?? reqService,
             model: reqModel,
             apiKey: resolvedApiKey ?? "",
+            projectRoot: root,
             ...(configuredEntry?.apiFormat ? { apiFormat: configuredEntry.apiFormat } : {}),
             ...(configuredEntry?.stream !== undefined ? { stream: configuredEntry.stream } : {}),
-            baseUrl: configuredEntry?.baseUrl ?? "",
+            baseUrl: pipelineBaseUrl,
           } as any)
         : client;
       // 确认式生产任务的 intent：写下一章的各种触发方式（quick-action 按钮、
@@ -5336,8 +5404,8 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
     const chapterNum = parseInt(c.req.param("chapter"), 10);
     const bookDir = state.bookDir(id);
     const body = await c.req
-      .json<{ mode?: string; brief?: string }>()
-      .catch(() => ({ mode: "spot-fix", brief: undefined }));
+      .json<{ mode?: string; brief?: string; includeInfo?: boolean; issueScope?: "default" | "info" | "warning" }>()
+      .catch(() => ({ mode: "spot-fix", brief: undefined, includeInfo: undefined, issueScope: undefined }));
 
     broadcast("revise:start", { bookId: id, chapter: chapterNum });
     try {
@@ -5353,10 +5421,18 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
         bookIdForSettings: id,
       }));
       const normalizedMode = body.mode ?? "spot-fix";
+      const issueScope = body.issueScope === "info" || body.issueScope === "warning" || body.issueScope === "default"
+        ? body.issueScope
+        : undefined;
       const result = await pipeline.reviseDraft(
         id,
         chapterNum,
         normalizedMode as "polish" | "rewrite" | "rework" | "spot-fix" | "anti-detect",
+        undefined,
+        {
+          issueScope,
+          includeInfoIssues: body.includeInfo === true,
+        },
       );
       broadcast("revise:complete", { bookId: id, chapter: chapterNum });
       return c.json(result);
@@ -6377,7 +6453,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
     try {
       const currentConfig = await loadCurrentProjectConfig();
       const model = createLLMTranslationModel({
-        client: createLLMClient(currentConfig.llm),
+        client: createLLMClient({ ...currentConfig.llm, projectRoot: root }),
         model: currentConfig.llm.model,
         maxTokens: body.maxTokens,
       });

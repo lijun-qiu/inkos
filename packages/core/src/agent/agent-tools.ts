@@ -1541,7 +1541,7 @@ export function createScriptCreationTool(
     name: "script_create",
     description:
       "Create a script project from a novel excerpt, idea, outline, or existing script. " +
-      "Writes human-readable Markdown spec and script files under dramas/.",
+      "Uses an episode outline + wave writer + missing-episode fill pipeline under dramas/.",
     label: "Script Creation",
     parameters: ScriptCreateParams,
     async execute(
@@ -1574,8 +1574,10 @@ export function createScriptCreationTool(
         [
           `Script "${result.projectId}" completed.`,
           `Spec: ${result.specPath}`,
+          result.outlinePath ? `Outline: ${result.outlinePath}` : undefined,
+          result.draftPath ? `Draft: ${result.draftPath}` : undefined,
           `Script: ${result.scriptPath}`,
-        ].join("\n"),
+        ].filter(Boolean).join("\n"),
         { kind: "script_created", ...result },
       );
     },

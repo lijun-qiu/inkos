@@ -435,7 +435,7 @@ describe("resolveEffectiveLLMConfig", () => {
     });
 
     expect(result.llm.service).toBe("openrouter");
-    expect(result.llm.model).toBe("openrouter/auto");
+    expect(result.llm.model).toBe("poolside/laguna-s-2.1:free");
   });
 
   it("CLI env 指向 Ollama 时允许用户本地安装的动态模型", async () => {

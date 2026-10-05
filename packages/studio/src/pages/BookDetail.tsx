@@ -110,6 +110,7 @@ export function BookDetail({
   const [draftRequestPending, setDraftRequestPending] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
+  const [confirmRejectChapter, setConfirmRejectChapter] = useState<number | null>(null);
   const [rewritingChapters, setRewritingChapters] = useState<ReadonlyArray<number>>([]);
   const [revisingChapters, setRevisingChapters] = useState<ReadonlyArray<number>>([]);
   const [auditingChapters, setAuditingChapters] = useState<ReadonlyArray<number>>([]);
@@ -260,7 +261,11 @@ export function BookDetail({
     }
   };
 
-  const handleRevise = async (chapterNum: number, mode: ReviseMode) => {
+  const handleRevise = async (
+    chapterNum: number,
+    mode: ReviseMode,
+    options?: { readonly issueScope?: "info" | "warning" },
+  ) => {
     const brief = window.prompt(
       data?.book.language === "en"
         ? "Optional revise brief for this run only. Leave blank to use existing focus."
@@ -270,11 +275,34 @@ export function BookDetail({
     if (brief === null) return;
     setRevisingChapters((prev) => [...prev, chapterNum]);
     try {
-      await fetchJson(`/books/${bookId}/revise/${chapterNum}`, {
+      const result = await fetchJson<{
+        applied?: boolean;
+        skippedReason?: string;
+        status?: string;
+        fixedIssues?: unknown[];
+      }>(`/books/${bookId}/revise/${chapterNum}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mode, brief: brief.trim() || undefined }),
+        body: JSON.stringify({
+          mode,
+          brief: brief.trim() || undefined,
+          issueScope: options?.issueScope,
+        }),
       });
+      if (!result.applied) {
+        alert(
+          data?.book.language === "en"
+            ? `Revision not applied: ${result.skippedReason ?? "no actionable issues."}`
+            : `未应用修订：${result.skippedReason ?? "没有可修的问题。"}`,
+        );
+      } else {
+        const fixedCount = result.fixedIssues?.length ?? 0;
+        alert(
+          data?.book.language === "en"
+            ? `Revision applied (${fixedCount} fixes). Status: ${result.status ?? "updated"}.`
+            : `已应用修订（${fixedCount} 项）。状态：${result.status ?? "已更新"}。`,
+        );
+      }
       refetch();
     } catch (e) {
       alert(e instanceof Error ? e.message : "Revision failed");
@@ -485,14 +513,14 @@ export function BookDetail({
           {t("bread.books")}
         </button>
         <span className="text-border">/</span>
-        <span className="text-foreground">{book.title}</span>
+        <span className="text-foreground break-words min-w-0" title={book.title}>{book.title}</span>
       </nav>
 
       {/* Header Section */}
       <div className="flex flex-col md:flex-row md:items-end justify-between gap-6 border-b border-border/40 pb-8">
-        <div className="space-y-2">
-          <div className="flex items-center gap-3">
-            <h1 className="text-4xl font-serif font-medium">{book.title}</h1>
+        <div className="space-y-2 min-w-0">
+          <div className="flex items-center gap-3 min-w-0">
+            <h1 className="text-4xl font-serif font-medium break-words" title={book.title}>{book.title}</h1>
             {book.language === "en" && (
               <span className="px-1.5 py-0.5 rounded border border-primary/20 text-primary text-[10px] font-bold">EN</span>
             )}
@@ -799,10 +827,7 @@ export function BookDetail({
                             <Check size={14} />
                           </button>
                           <button
-                            onClick={async () => {
-                              try { await postApi(`/books/${bookId}/chapters/${ch.number}/reject`); refetch(); }
-                              catch (e) { alert(e instanceof Error ? e.message : "Reject failed"); }
-                            }}
+                            onClick={() => setConfirmRejectChapter(ch.number)}
                             className="p-2 rounded-lg bg-destructive/10 text-destructive hover:bg-destructive hover:text-white transition-all shadow-sm"
                             title={t("book.reject")}
                           >
@@ -857,14 +882,25 @@ export function BookDetail({
                         disabled={revisingChapters.includes(ch.number)}
                         value=""
                         onChange={(e) => {
-                          const mode = e.target.value as ReviseMode;
-                          if (mode) handleRevise(ch.number, mode);
+                          const value = e.target.value;
+                          if (!value) return;
+                          if (value === "info-fix") {
+                            handleRevise(ch.number, "spot-fix", { issueScope: "info" });
+                            return;
+                          }
+                          if (value === "warning-fix") {
+                            handleRevise(ch.number, "spot-fix", { issueScope: "warning" });
+                            return;
+                          }
+                          handleRevise(ch.number, value as ReviseMode);
                         }}
                         className="px-2 py-1.5 text-[11px] font-bold rounded-lg bg-secondary text-muted-foreground border border-border/50 outline-none hover:text-primary hover:bg-primary/10 transition-all disabled:opacity-50 cursor-pointer"
                         title="Revise with AI"
                       >
                         <option value="" disabled>{revisingChapters.includes(ch.number) ? t("common.loading") : t("book.curate")}</option>
                         <option value="spot-fix">{t("book.spotFix")}</option>
+                        <option value="info-fix">{t("book.fixInfo")}</option>
+                        <option value="warning-fix">{t("book.fixWarnings")}</option>
                         <option value="polish">{t("book.polish")}</option>
                         <option value="rewrite">{t("book.rewrite")}</option>
                         <option value="rework">{t("book.rework")}</option>
@@ -900,6 +936,26 @@ export function BookDetail({
         variant="danger"
         onConfirm={handleDeleteBook}
         onCancel={() => setConfirmDeleteOpen(false)}
+      />
+      <ConfirmDialog
+        open={confirmRejectChapter !== null}
+        title={t("book.confirmRejectTitle")}
+        message={t("book.confirmReject").replace("{n}", String(confirmRejectChapter ?? ""))}
+        confirmLabel={t("book.reject")}
+        cancelLabel={t("common.cancel")}
+        variant="danger"
+        onConfirm={async () => {
+          const chapterNum = confirmRejectChapter;
+          setConfirmRejectChapter(null);
+          if (chapterNum == null) return;
+          try {
+            await postApi(`/books/${bookId}/chapters/${chapterNum}/reject`);
+            refetch();
+          } catch (e) {
+            alert(e instanceof Error ? e.message : "Reject failed");
+          }
+        }}
+        onCancel={() => setConfirmRejectChapter(null)}
       />
     </div>
   );

@@ -1,0 +1,4 @@
+{
+  "status": "failed",
+  "error": "无法连接到 API 服务。可能原因：\n  1. baseUrl 地址不正确（当前：https://apihub.agnes-ai.com/v1）\n  2. 网络不通或被防火墙拦截\n  3. API 服务暂时不可用\n  建议：检查 INKOS_LLM_BASE_URL 是否包含完整路径（如 /v1）"
+}

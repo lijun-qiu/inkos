@@ -59,7 +59,7 @@ export function buildShortFictionOutlineSystemPrompt(language: ShortFictionLangu
       "Work only from this direction and any reference text the user supplied; never claim to have read, quoted, or inherited material that was not provided.",
       "Content comes first: the title, the opening, the pressure on the protagonist, the evidence/relationship/identity leverage, the escalation chain, the reversal chain, and the payoff landing must be strong enough to carry a single-pass full draft.",
       "Do not over-structure and do not output JSON/YAML. Write human-readable Markdown, but the chapter plan must be dense enough that a writer can draft the whole story in one pass.",
-      "A short defaults to 12-18 chapters at roughly 600-800 words per chapter. The story must be complete — not the first five chapters of a novel starter kit.",
+      "A short defaults to 50-100 chapters at roughly 1200-1500 words per chapter. The story must be complete — not the first five chapters of a novel starter kit.",
     ].join("\n");
   }
   return [
@@ -67,7 +67,7 @@ export function buildShortFictionOutlineSystemPrompt(language: ShortFictionLangu
     "只基于本次创作方向和用户提供的参考文本创作；没有提供的资料，不要声称读过、引用过或继承过。",
     "目标是内容优先：标题、开篇、人物压力、证据/关系/身份杠杆、升级链、反转链和回报落点必须能支撑一次写完整篇。",
     "不要过度结构化，不要输出 JSON/YAML。用人能读的 Markdown，但章节方案必须足够密，写手拿到后能直接一次写完。",
-    "短篇默认 12-18 章，每章约 900-1200 字。故事要完整，不是长篇前 5 章启动包。",
+    "短篇默认 50-100 章，每章约 1800-2200 字（目标 2000）。故事要完整，不是长篇前 5 章启动包。",
   ].join("\n");
 }
 

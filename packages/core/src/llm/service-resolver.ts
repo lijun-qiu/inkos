@@ -52,9 +52,13 @@ export async function resolveServiceModel(
   // Get pi-ai Model — may return undefined for model IDs not in the built-in registry
   const piModel = getModel(piProvider as any, modelId as any) as Model<Api> | undefined;
   const effectiveBaseUrl = configuredBaseUrl || piModel?.baseUrl || "";
-  const compat = apiType === "openai-completions"
+  const baseCompat = apiType === "openai-completions"
     ? resolveProviderCompat(endpoint, effectiveBaseUrl)
     : undefined;
+  // 多数 OpenAI 兼容中转不接受 developer role；pi-ai 在 reasoning=true 时会改 role。
+  const compat = baseService === "custom"
+    ? { ...(baseCompat ?? {}), supportsDeveloperRole: false }
+    : baseCompat;
 
   if (!effectiveBaseUrl) {
     throw new Error(
@@ -82,12 +86,13 @@ export async function resolveServiceModel(
   // Remaining room is enforced per call by fitMaxTokensToContextWindow.
 
   const model: Model<Api> = {
-    id: modelId,
+    id: endpointModel?.deploymentName ?? modelId,
     name: piModel?.name ?? modelId,
     api: apiType as Api,
     provider: piProvider,
     baseUrl: effectiveBaseUrl,
-    reasoning: piModel?.reasoning ?? false,
+    // 自定义中转不要继承 pi-ai 内置卡的 reasoning 标志，避免 system→developer 触发 400。
+    reasoning: baseService === "custom" ? false : (piModel?.reasoning ?? false),
     input: piModel?.input ?? ["text"] as ("text" | "image")[],
     cost: piModel?.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow,

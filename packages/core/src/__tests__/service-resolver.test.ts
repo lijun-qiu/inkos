@@ -106,9 +106,23 @@ describe("resolveServiceModel", () => {
       JSON.stringify({ services: { deepseek: { apiKey: "sk-deep" } } }),
     );
 
-    const result = await resolveServiceModel("deepseek", "deepseek-v4-pro", root);
+    const result = await resolveServiceModel("deepseek", "deepseek/deepseek-v4-pro", root);
 
+    expect(result.model.id).toBe("deepseek-v4-pro");
     expect(result.model.compat).toMatchObject({ requiresAssistantAfterToolResult: true });
+  });
+
+  it("resolves Magta DeepSeek V4 Flash app id to API deploymentName", async () => {
+    await mkdir(join(root, ".inkos"), { recursive: true });
+    await writeFile(
+      join(root, ".inkos", "secrets.json"),
+      JSON.stringify({ services: { modelscope: { apiKey: "ms-test" } } }),
+    );
+
+    const result = await resolveServiceModel("modelscope", "modelscope/deepseek-v4-flash", root);
+
+    expect(result.model.id).toBe("deepseek-ai/DeepSeek-V4-Flash-0731");
+    expect(result.model.baseUrl).toBe("http://127.0.0.1:10001");
   });
 
   it("constructs model from preset when getModel returns undefined", async () => {
@@ -124,7 +138,7 @@ describe("resolveServiceModel", () => {
     expect(result.model).toBeDefined();
     expect(result.model.id).toBe("deepseek-chat");
     expect(result.model.api).toBe("openai-completions");
-    expect(result.model.baseUrl).toBe("https://api.deepseek.com");
+    expect(result.model.baseUrl).toBe("https://api.deepseek.com/v1");
     expect(result.model.provider).toBe("openai");
     expect(result.apiKey).toBe("sk-deep");
   });
@@ -226,7 +240,7 @@ describe("resolveServiceModel", () => {
     expect(result.model.maxTokens).toBe(131072);
   });
 
-  it("openrouter Nemotron Super uses bank maxOutput below full context", async () => {
+  it("openrouter Laguna S free uses bank maxOutput below full context", async () => {
     await mkdir(join(root, ".inkos"), { recursive: true });
     await writeFile(
       join(root, ".inkos", "secrets.json"),
@@ -235,7 +249,7 @@ describe("resolveServiceModel", () => {
 
     const result = await resolveServiceModel(
       "openrouter",
-      "nvidia/nemotron-3-super-120b-a12b:free",
+      "poolside/laguna-s-2.1:free",
       root,
       "https://openrouter.ai/api/v1",
       "chat",
@@ -243,7 +257,7 @@ describe("resolveServiceModel", () => {
 
     expect(result.model.api).toBe("openai-completions");
     expect(result.model.contextWindow).toBe(262_144);
-    expect(result.model.maxTokens).toBe(65_536);
+    expect(result.model.maxTokens).toBe(32_768);
     expect(result.model.maxTokens).toBeLessThan(result.model.contextWindow);
   });
 });

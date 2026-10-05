@@ -216,12 +216,12 @@ describe("OpenRouter reasoning defaults", () => {
     });
   });
 
-  it("uses minimal reasoning for Super planning/audit models", async () => {
+  it("uses minimal reasoning for Laguna tool/planning models", async () => {
     fetchCalls.length = 0;
     const client = createLLMClient({
       provider: "openai",
       service: "openrouter",
-      model: "nvidia/nemotron-3-super-120b-a12b:free",
+      model: "poolside/laguna-s-2.1:free",
       apiKey: "sk-or",
       apiFormat: "chat",
       stream: false,
@@ -231,7 +231,7 @@ describe("OpenRouter reasoning defaults", () => {
       extra: {},
     } as never);
 
-    await chatCompletion(client, "nvidia/nemotron-3-super-120b-a12b:free", [
+    await chatCompletion(client, "poolside/laguna-s-2.1:free", [
       { role: "user", content: "hi" },
     ], { retry: false });
 
@@ -239,5 +239,54 @@ describe("OpenRouter reasoning defaults", () => {
     expect(fetchCalls[0]!.body).toMatchObject({
       reasoning: { effort: "minimal" },
     });
+  });
+});
+
+describe("custom gateway DeepSeek V4 defaults", () => {
+  it("does not inherit official deepseek maxOutput for short gateway ids", () => {
+    const client = createLLMClient({
+      provider: "openai",
+      service: "custom:MyProxy",
+      configSource: "studio",
+      model: "deepseek-v4-flash",
+      apiKey: "sk-test",
+      apiFormat: "chat",
+      stream: false,
+      temperature: 0.7,
+      thinkingBudget: 0,
+      baseUrl: "https://api2.yunshuzhilian.asia/v1",
+      extra: {},
+    } as never);
+
+    // Official bank maxOutput is 393216; some gateways 400 above 384000.
+    expect(client.defaults.maxTokens).toBeLessThanOrEqual(32_768);
+    expect(client._piModel?.maxTokens).toBeLessThanOrEqual(32_768);
+  });
+
+  it("disables thinking for custom deepseek-v4 models", async () => {
+    fetchCalls.length = 0;
+    const client = createLLMClient({
+      provider: "openai",
+      service: "custom:MyProxy",
+      configSource: "studio",
+      model: "deepseek-v4-flash",
+      apiKey: "sk-test",
+      apiFormat: "chat",
+      stream: false,
+      temperature: 0.7,
+      thinkingBudget: 0,
+      baseUrl: "https://api2.yunshuzhilian.asia/v1",
+      extra: {},
+    } as never);
+
+    await chatCompletion(client, "deepseek-v4-flash", [
+      { role: "user", content: "hi" },
+    ], { retry: false });
+
+    expect(fetchCalls).toHaveLength(1);
+    expect(fetchCalls[0]!.body).toMatchObject({
+      thinking: { type: "disabled" },
+    });
+    expect(fetchCalls[0]!.body.max_tokens).toBeLessThanOrEqual(32_768);
   });
 });

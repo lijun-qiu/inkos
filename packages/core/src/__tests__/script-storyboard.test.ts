@@ -279,3 +279,66 @@ describe("script and storyboard creation helpers", () => {
     ]);
   });
 });
+
+describe("script episode pipeline helpers", () => {
+  it("resolves episode count from explicit value and target length", async () => {
+    const { resolveScriptEpisodePlan } = await import("../agents/script-episode.js");
+    expect(resolveScriptEpisodePlan({ episodeCount: 3 }).episodeCount).toBe(3);
+    expect(resolveScriptEpisodePlan({ requirements: "约10万字" }).episodeCount).toBe(34);
+    expect(resolveScriptEpisodePlan({
+      sourceText: Array.from({ length: 50 }, (_, i) => `## 第${i + 1}章 标题`).join("\n"),
+    }).episodeCount).toBe(50);
+  });
+
+  it("parses episode tags, finds empties, and assembles a single finale", async () => {
+    const {
+      assembleScriptMarkdown,
+      findEmptyScriptEpisodes,
+      parseScriptBatchDraft,
+      validateScriptDraftForFinal,
+    } = await import("../agents/script-episode.js");
+
+    const raw = [
+      "=== SCRIPT_TITLE ===",
+      "试播剧",
+      "=== EPISODE 1 TITLE ===",
+      "开端",
+      "=== EPISODE 1 CONTENT ===",
+      "场次：夜。对白：开始。",
+      "（全剧终）",
+      "=== EPISODE 2 TITLE ===",
+      "收束",
+      "=== EPISODE 2 CONTENT ===",
+      "场次：晨。对白：结束。",
+    ].join("\n");
+
+    const draft = parseScriptBatchDraft(raw, { expectedEpisodes: 3, titleFallback: "试播剧" });
+    expect(findEmptyScriptEpisodes(draft)).toEqual([3]);
+    expect(() => validateScriptDraftForFinal(draft)).toThrow(/missing episodes/);
+
+    const filled = parseScriptBatchDraft(`${raw}\n=== EPISODE 3 TITLE ===\n终章\n=== EPISODE 3 CONTENT ===\n最后一场。\n`, {
+      expectedEpisodes: 3,
+      titleFallback: "试播剧",
+    });
+    validateScriptDraftForFinal(filled);
+    const script = assembleScriptMarkdown(filled);
+    expect(script).toContain("### 第1集 开端");
+    expect(script).toContain("### 第3集 终章");
+    expect(script.match(/全剧终/g)?.length).toBe(1);
+    expect(script.indexOf("全剧终")).toBeGreaterThan(script.indexOf("第3集"));
+  });
+
+  it("passes the full novel into script context by default", async () => {
+    const { clipScriptSourceForContext } = await import("../agents/script-episode.js");
+    const source = `${"前".repeat(20_000)}【中段标记】${"后".repeat(20_000)}`;
+    const full = clipScriptSourceForContext(source);
+    expect(full).toBe(source);
+    expect(full).toContain("【中段标记】");
+    expect(full).not.toContain("中间已截断");
+
+    const clipped = clipScriptSourceForContext(source, 24_000);
+    expect(clipped.length).toBeLessThan(source.length);
+    expect(clipped).toContain("中间已截断");
+    expect(clipped).not.toContain("【中段标记】");
+  });
+});

@@ -566,9 +566,9 @@ function summarizeSourceForSpec(sourceText: string | undefined, language: "zh" |
   return `已提供完整源素材，约 ${text.length} 字符；生成时会读取完整内容。`;
 }
 
-function estimateScriptMaxTokens(input: ScriptCreationInput): number {
-  const episodes = input.episodeCount ?? 6;
-  return Math.min(32000, Math.max(12000, episodes * 2200));
+function estimateScriptMaxTokens(_input: ScriptCreationInput): number {
+  // Keep a high single-shot ceiling; the original episode*2200 formula truncated long scripts.
+  return 200_000;
 }
 
 function estimateStoryboardMaxTokens(input: StoryboardCreationInput): number {

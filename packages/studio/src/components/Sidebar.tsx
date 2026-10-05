@@ -356,7 +356,9 @@ export function Sidebar({ nav, activePage, sse, t }: {
                       }`}
                     >
                       <FolderOpen size={14} className="shrink-0 text-muted-foreground/60" />
-                      <span className="truncate flex-1 text-left">{book.title}</span>
+                      <span className="min-w-0 flex-1 text-left break-words whitespace-normal leading-snug" title={book.title}>
+                        {book.title}
+                      </span>
                     </button>
                   </div>
 

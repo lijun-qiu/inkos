@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   clearBookCreateSessionId,
   filterModelGroups,
+  formatModelDisplayId,
+  formatSelectedModelLabel,
   getBookCreateSessionId,
   getChatScrollBehavior,
   getProjectChatSessionId,
@@ -117,6 +119,39 @@ describe("filterModelGroups", () => {
       },
     ]);
   });
+
+  it("filters by platform-prefixed display id", () => {
+    expect(filterModelGroups(grouped, "openai/gpt-4o")).toEqual([
+      {
+        service: "openai",
+        label: "OpenAI",
+        models: [{ id: "gpt-4o", name: "gpt-4o" }],
+      },
+    ]);
+  });
+});
+
+describe("formatModelDisplayId / formatSelectedModelLabel", () => {
+  it("keeps ids that already include a platform prefix", () => {
+    expect(formatModelDisplayId("openrouter", "deepseek/deepseek-chat-v3.1"))
+      .toBe("deepseek/deepseek-chat-v3.1");
+    expect(formatModelDisplayId("modelscope", "modelscope/deepseek-v4-flash"))
+      .toBe("modelscope/deepseek-v4-flash");
+  });
+
+  it("prefixes bare model ids with the service platform", () => {
+    expect(formatModelDisplayId("deepseek", "deepseek-v4-flash"))
+      .toBe("deepseek/deepseek-v4-flash");
+    expect(formatModelDisplayId("kkaiapi", "deepseek-v4-flash"))
+      .toBe("kkaiapi/deepseek-v4-flash");
+  });
+
+  it("formats outside trigger with service label and platform-prefixed model", () => {
+    expect(formatSelectedModelLabel("DeepSeek", "deepseek", "deepseek-v4-flash"))
+      .toBe("DeepSeek · deepseek/deepseek-v4-flash");
+    expect(formatSelectedModelLabel("魔塔代理", "modelscope", "modelscope/deepseek-v4-flash"))
+      .toBe("魔塔代理 · modelscope/deepseek-v4-flash");
+  });
 });
 
 describe("pickModelSelection", () => {
@@ -184,6 +219,64 @@ describe("pickModelSelection", () => {
 
   it("returns null when no models are available", () => {
     expect(pickModelSelection([], "gemini-3.1-flash-image-preview", "google")).toBeNull();
+  });
+
+  it("maps legacy bare deepseek-v4-flash preference to platform-prefixed bank id", () => {
+    const deepseekGroups = [
+      {
+        service: "modelscope",
+        label: "魔塔代理",
+        models: [
+          { id: "modelscope/deepseek-v4-flash", name: "modelscope/deepseek-v4-flash" },
+          { id: "modelscope/deepseek-v4-pro", name: "modelscope/deepseek-v4-pro" },
+        ],
+      },
+      {
+        service: "deepseek",
+        label: "DeepSeek",
+        models: [
+          { id: "deepseek/deepseek-v4-flash", name: "deepseek/deepseek-v4-flash" },
+        ],
+      },
+    ] as const;
+
+    expect(pickModelSelection(deepseekGroups, null, null, {
+      service: "modelscope",
+      model: "deepseek-v4-flash",
+    })).toEqual({
+      model: "modelscope/deepseek-v4-flash",
+      service: "modelscope",
+    });
+
+    expect(pickModelSelection(deepseekGroups, null, null, {
+      service: "deepseek",
+      model: "deepseek-v4-flash",
+    })).toEqual({
+      model: "deepseek/deepseek-v4-flash",
+      service: "deepseek",
+    });
+
+    // Preferred custom service not loaded yet: do not steal modelscope's
+    // deepseek-v4-flash via bare-id endsWith matching.
+    expect(pickModelSelection(deepseekGroups, null, null, {
+      service: "custom:MyProxy",
+      model: "deepseek-v4-flash",
+    })).toBeNull();
+
+    expect(pickModelSelection([
+      ...deepseekGroups,
+      {
+        service: "custom:MyProxy",
+        label: "MyProxy",
+        models: [{ id: "deepseek-v4-flash", name: "deepseek-v4-flash" }],
+      },
+    ], null, null, {
+      service: "custom:MyProxy",
+      model: "deepseek-v4-flash",
+    })).toEqual({
+      model: "deepseek-v4-flash",
+      service: "custom:MyProxy",
+    });
   });
 });
 

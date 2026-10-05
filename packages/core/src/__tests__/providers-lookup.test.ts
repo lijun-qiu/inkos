@@ -49,16 +49,16 @@ describe("lookupModel", () => {
 });
 
 describe("Layer 2 优先级（聚合入口精简后）", () => {
-  it("deepseek/deepseek-r1-0528 命中保留的 OpenRouter provider", () => {
-    const hit = lookupModel("custom", "deepseek/deepseek-r1-0528");
+  it("OpenRouter 免费模型 id 可被全局 lookup 命中", () => {
+    const hit = lookupModel("custom", "nvidia/nemotron-3-ultra-550b-a55b:free");
     expect(hit).toBeDefined();
-    expect(hit?.maxOutput).toBe(4096);
+    expect(hit?.maxOutput).toBe(65536);
   });
 
   it("OpenRouter 专属带后缀 id（:free）命中 openrouter provider", () => {
-    const hit = lookupModel("custom", "meta-llama/llama-3.1-8b-instruct:free");
+    const hit = lookupModel("custom", "poolside/laguna-s-2.1:free");
     expect(hit).toBeDefined();
-    expect(hit?.maxOutput).toBe(4096);
+    expect(hit?.maxOutput).toBe(32768);
   });
 
   it("已下架默认入口的 PPIO 不再参与 provider 精确查找", () => {

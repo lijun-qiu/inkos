@@ -132,6 +132,11 @@ export function ServiceDetailPage({ serviceId, nav }: { serviceId: string; nav: 
     isCustom,
     baseUrl,
   });
+  const apiKeyPlaceholder = serviceId === "modelscope"
+    ? "modelscope_proxy_api_key"
+    : apiKeyOptional
+      ? tr("本地服务可留空", "Leave blank for local services")
+      : "sk-...";
 
   // -- Handlers --
   const handleTest = async () => {
@@ -218,6 +223,8 @@ export function ServiceDetailPage({ serviceId, nav }: { serviceId: string; nav: 
         isCustom,
         resolvedCustomName,
         apiKey: trimmedKey,
+        // Drop any legacy key-pool entries (ModelScope now uses the local injector proxy).
+        apiKeys: [],
         baseUrl,
         apiFormat,
         stream,
@@ -287,7 +294,7 @@ export function ServiceDetailPage({ serviceId, nav }: { serviceId: string; nav: 
             <input
               type={showKey ? "text" : "password"} value={apiKey}
               onChange={(e) => setApiKey(e.target.value)}
-              placeholder={apiKeyOptional ? tr("本地服务可留空", "Leave blank for local services") : "sk-..."}
+              placeholder={apiKeyPlaceholder}
               className="w-full rounded-lg border border-border/60 bg-background px-3 py-2 pr-10 text-sm font-mono"
             />
             <button type="button" onClick={() => setShowKey((v) => !v)}
@@ -295,6 +302,14 @@ export function ServiceDetailPage({ serviceId, nav }: { serviceId: string; nav: 
               {showKey ? <EyeOff size={14} /> : <Eye size={14} />}
             </button>
           </div>
+          {serviceId === "modelscope" && (
+            <p className="mt-1.5 text-[11px] text-muted-foreground/70 leading-relaxed">
+              {tr(
+                "默认连接本机魔塔代理 http://127.0.0.1:10001；客户端填 modelscope_proxy_api_key。真实 ms-* 配在代理 .env.modelscope。",
+                "Uses the local ModelScope proxy at http://127.0.0.1:10001; client key is modelscope_proxy_api_key. Put real ms-* keys in the proxy .env.modelscope.",
+              )}
+            </p>
+          )}
         </Field>
 
         {/* Actions + feedback */}

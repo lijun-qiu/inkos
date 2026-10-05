@@ -57,6 +57,18 @@ describe("providers structural integrity", () => {
     expect(zhipu?.models.some((model) => model.id === "glm-4-flash" && model.enabled !== false)).toBe(true);
   });
 
+  it("Agnes 收录 3.0 Flash", () => {
+    const agnes = getEndpoint("agnes");
+    expect(agnes?.checkModel).toBe("agnes-3.0-flash");
+    expect(agnes?.models[0]).toEqual({
+      id: "agnes-3.0-flash",
+      maxOutput: 65_536,
+      contextWindowTokens: 524_288,
+      enabled: true,
+      releasedAt: "2026-09-01",
+    });
+  });
+
   it("A 组至少有 5 个核心 provider", () => {
     const ids = getAllEndpoints().map((p) => p.id);
     expect(ids).toContain("anthropic");

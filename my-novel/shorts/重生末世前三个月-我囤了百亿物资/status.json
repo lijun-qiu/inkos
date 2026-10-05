@@ -1,0 +1,5 @@
+{
+  "status": "complete",
+  "warning": "revision skipped: InkOS context window guard: estimated input 129822 tokens + reserved output 0 tokens exceeds context window 128000 for model \"modelscope/deepseek-v4-pro\". Please compress the active book/session context before retrying; InkOS will not truncate semantic text automatically.",
+  "updatedAt": "2026-09-13T10:36:18.782Z"
+}

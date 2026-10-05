@@ -59,8 +59,11 @@ export async function loadConfigWithDiagnostics(options?: {
   });
 }
 
-export function createClient(config: ProjectConfig) {
-  return createLLMClient(config.llm);
+export function createClient(config: ProjectConfig, projectRoot?: string) {
+  return createLLMClient({
+    ...config.llm,
+    ...(projectRoot ? { projectRoot } : {}),
+  });
 }
 
 export function parseLLMOverridesFromArgv(argv: readonly string[]): LLMConfigCliOverrides {
@@ -143,12 +146,15 @@ export function buildPipelineConfig(
     : undefined;
 
   return {
-    client: createLLMClient(config.llm),
+    client: createLLMClient({
+      ...config.llm,
+      projectRoot: root,
+    }),
     model: config.llm.model,
     projectRoot: root,
     defaultLLMConfig: config.llm,
     foundationReviewRetries: config.foundation.reviewRetries,
-    writingReviewRetries: config.writing?.reviewRetries ?? 5,
+    writingReviewRetries: config.writing?.reviewRetries ?? 8,
     chapterReviewMode: extra?.chapterReviewMode,
     revisionGate: extra?.revisionGate,
     modelOverrides: config.modelOverrides,

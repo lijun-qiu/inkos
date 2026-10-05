@@ -21,7 +21,7 @@ import type { BookConfig } from "../models/book.js";
 import type { ChapterMeta } from "../models/chapter.js";
 import { MemoryDB } from "../state/memory-db.js";
 import * as memoryDbModule from "../state/memory-db.js";
-import { countChapterLength } from "../utils/length-metrics.js";
+import { buildLengthSpec, countChapterLength } from "../utils/length-metrics.js";
 
 const require = createRequire(import.meta.url);
 const hasNodeSqlite = (() => {
@@ -2096,7 +2096,8 @@ describe("PipelineRunner", () => {
 
   it("does not normalize minor soft-range length drift", async () => {
     const { root, runner, bookId } = await createRunnerFixture();
-    const nearTargetDraft = "近".repeat(260);
+    // Stay inside soft band for target 220 (soft 190-250) so normalizer must not run.
+    const nearTargetDraft = "近".repeat(240);
 
     vi.spyOn(WriterAgent.prototype, "writeChapter").mockResolvedValue(
       createWriterOutput({
@@ -2480,11 +2481,12 @@ describe("PipelineRunner", () => {
 
   it("persists truth files derived from the final revised chapter", async () => {
     const { root, runner, state, bookId } = await createRunnerFixture();
+    const longBody = `${"定".repeat(2800)}章末钩子。`;
 
     vi.spyOn(WriterAgent.prototype, "writeChapter").mockResolvedValue(
       createWriterOutput({
-        content: "Original draft body.",
-        wordCount: "Original draft body.".length,
+        content: longBody,
+        wordCount: longBody.length,
         updatedState: "original state",
         updatedLedger: "original ledger",
         updatedHooks: "original hooks",
@@ -2502,14 +2504,18 @@ describe("PipelineRunner", () => {
         ],
       }),
     );
-    // First audit: postWriteErrors force passed=false, score 40 triggers loop
-    // Second audit: after repair, passes
+    // First audit: critical hard-fault forces spot-fix; second audit passes.
     vi.spyOn(ContinuityAuditor.prototype, "auditChapter")
       .mockResolvedValueOnce(createAuditResult({
-        passed: true,
+        passed: false,
         overallScore: 40,
-        issues: [],
-        summary: "postWriteErrors will override passed",
+        issues: [{
+          severity: "critical",
+          category: "post-write",
+          description: "Needs a deterministic fix",
+          suggestion: "Repair the line",
+        }],
+        summary: "critical forces repair",
       }))
       .mockResolvedValueOnce(createAuditResult({
         passed: true,
@@ -2517,16 +2523,17 @@ describe("PipelineRunner", () => {
         issues: [],
         summary: "clean after fix",
       }));
+    const revisedBody = `${"改".repeat(2800)}新钩子。`;
     vi.spyOn(ReviserAgent.prototype, "reviseChapter").mockResolvedValue(
       createReviseOutput({
-        revisedContent: "Final revised body.",
-        wordCount: "Final revised body.".length,
+        revisedContent: revisedBody,
+        wordCount: revisedBody.length,
       }),
     );
     vi.spyOn(ChapterAnalyzerAgent.prototype, "analyzeChapter").mockResolvedValue(
       createAnalyzedOutput({
-        content: "Final revised body.",
-        wordCount: "Final revised body.".length,
+        content: revisedBody,
+        wordCount: revisedBody.length,
         updatedState: "final analyzed state",
         updatedLedger: "final analyzed ledger",
         updatedHooks: "final analyzed hooks",
@@ -5087,6 +5094,97 @@ describe("PipelineRunner", () => {
     }
   }, SLOW_PIPELINE_TEST_TIMEOUT_MS);
 
+  it("revises info findings only when issueScope is info", async () => {
+    const { root, runner, bookId, chaptersDir, revisedBody } = await createRevisionGateFixture("lenient");
+    const infoIssue: AuditIssue = {
+      severity: "info",
+      category: "AI痕迹",
+      description: "明喻略密。",
+      suggestion: "换成具体感官。",
+    };
+    const warningIssue: AuditIssue = {
+      severity: "warning",
+      category: "节奏",
+      description: "过渡段缺回环。",
+      suggestion: "补一句事后反应。",
+    };
+
+    vi.spyOn(ContinuityAuditor.prototype, "auditChapter")
+      .mockResolvedValue(createAuditResult({ passed: true, issues: [infoIssue], summary: "passed with notes" }));
+    const reviseChapter = vi.spyOn(ReviserAgent.prototype, "reviseChapter");
+
+    try {
+      const skipped = await runner.reviseDraft(bookId, 1, "spot-fix");
+      expect(skipped.applied).toBe(false);
+      expect(skipped.skippedReason).toContain("No warning, critical, or AI-tell");
+      expect(reviseChapter).not.toHaveBeenCalled();
+
+      reviseChapter.mockClear();
+      vi.spyOn(ContinuityAuditor.prototype, "auditChapter")
+        .mockResolvedValueOnce(createAuditResult({
+          passed: true,
+          issues: [infoIssue, warningIssue],
+          summary: "info + warning",
+        }))
+        .mockResolvedValueOnce(createAuditResult({ passed: true, issues: [warningIssue], summary: "info cleared" }));
+
+      const applied = await runner.reviseDraft(bookId, 1, "spot-fix", undefined, {
+        issueScope: "info",
+      });
+      const savedChapter = await readFile(join(chaptersDir, "0001_Test_Chapter.md"), "utf-8");
+
+      expect(applied.applied).toBe(true);
+      expect(reviseChapter).toHaveBeenCalledTimes(1);
+      expect(reviseChapter.mock.calls[0]?.[3]).toEqual([
+        expect.objectContaining({ severity: "info", category: "AI痕迹" }),
+      ]);
+      expect(savedChapter).toContain(revisedBody);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, SLOW_PIPELINE_TEST_TIMEOUT_MS);
+
+  it("revises warning findings only when issueScope is warning", async () => {
+    const { root, runner, bookId, chaptersDir, revisedBody } = await createRevisionGateFixture("lenient");
+    const infoIssue: AuditIssue = {
+      severity: "info",
+      category: "AI痕迹",
+      description: "明喻略密。",
+      suggestion: "换成具体感官。",
+    };
+    const warningIssue: AuditIssue = {
+      severity: "warning",
+      category: "节奏",
+      description: "过渡段缺回环。",
+      suggestion: "补一句事后反应。",
+    };
+
+    const reviseChapter = vi.spyOn(ReviserAgent.prototype, "reviseChapter");
+    vi.spyOn(ContinuityAuditor.prototype, "auditChapter")
+      .mockResolvedValueOnce(createAuditResult({
+        passed: false,
+        issues: [infoIssue, warningIssue],
+        summary: "info + warning",
+      }))
+      .mockResolvedValueOnce(createAuditResult({ passed: true, issues: [infoIssue], summary: "warning cleared" }));
+
+    try {
+      const applied = await runner.reviseDraft(bookId, 1, "spot-fix", undefined, {
+        issueScope: "warning",
+      });
+      const savedChapter = await readFile(join(chaptersDir, "0001_Test_Chapter.md"), "utf-8");
+
+      expect(applied.applied).toBe(true);
+      expect(reviseChapter).toHaveBeenCalledTimes(1);
+      expect(reviseChapter.mock.calls[0]?.[3]).toEqual([
+        expect.objectContaining({ severity: "warning", category: "节奏" }),
+      ]);
+      expect(savedChapter).toContain(revisedBody);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, SLOW_PIPELINE_TEST_TIMEOUT_MS);
+
   it("rejects a worsening manual revision under the lenient gate and reports the lenient standard", async () => {
     const { root, runner, bookId, chaptersDir, revisedBody } = await createRevisionGateFixture("lenient");
 
@@ -5373,6 +5471,91 @@ describe("PipelineRunner", () => {
 
     await rm(root, { recursive: true, force: true });
   });
+
+  it("counts deterministic post-write and soft-length findings as revise blockers", async () => {
+    const { root, runner, state, bookId } = await createRunnerFixture();
+    const bookDir = state.bookDir(bookId);
+    const book = await state.loadBookConfig(bookId);
+    // Force many consecutive short narrative paragraphs (<35 chars) + over-length body.
+    const shortBeats = Array.from({ length: 8 }, (_, i) => `她猛地停住脚步${i}。`).join("\n\n");
+    const filler = "这是补足字数的叙述。" .repeat(120);
+    const chapterContent = `${shortBeats}\n\n${filler}`;
+    const lengthSpec = buildLengthSpec(200, "zh");
+
+    const result = await (
+      runner as unknown as {
+        evaluateMergedAudit: (params: {
+          auditor: Pick<ContinuityAuditor, "auditChapter">;
+          book: BookConfig;
+          bookDir: string;
+          chapterContent: string;
+          chapterNumber: number;
+          language: "zh" | "en";
+          lengthSpec: ReturnType<typeof buildLengthSpec>;
+        }) => Promise<{
+          auditResult: AuditResult;
+          blockingCount: number;
+          warningCount: number;
+        }>;
+      }
+    ).evaluateMergedAudit({
+      auditor: {
+        auditChapter: vi.fn().mockResolvedValue(
+          createAuditResult({
+            passed: true,
+            issues: [],
+            summary: "llm clean",
+          }),
+        ),
+      },
+      book,
+      bookDir,
+      chapterContent,
+      chapterNumber: 1,
+      language: "zh",
+      lengthSpec,
+    });
+
+    expect(result.warningCount).toBeGreaterThan(0);
+    expect(result.blockingCount).toBeGreaterThan(0);
+    expect(result.auditResult.issues.some((issue) =>
+      issue.category === "连续短段" || issue.category === "段落过碎" || issue.category === "length",
+    )).toBe(true);
+
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it("runs polish even when live audit has no warning/critical/AI-tell blockers", async () => {
+    const { root, runner, bookId, chaptersDir, revisedBody } = await createRevisionGateFixture("lenient");
+    vi.spyOn(ContinuityAuditor.prototype, "auditChapter").mockResolvedValue(
+      createAuditResult({
+        passed: true,
+        issues: [{
+          severity: "info",
+          category: "AI痕迹",
+          description: "明喻略密。",
+          suggestion: "换成具体感官。",
+        }],
+        summary: "passed with notes",
+      }),
+    );
+    const reviseChapter = vi.spyOn(ReviserAgent.prototype, "reviseChapter").mockResolvedValue(
+      createReviseOutput({
+        revisedContent: revisedBody,
+        wordCount: countChapterLength(revisedBody, "en_words"),
+        fixedIssues: ["- Polished cadence."],
+      }),
+    );
+
+    try {
+      const result = await runner.reviseDraft(bookId, 1, "polish");
+      expect(reviseChapter).toHaveBeenCalledTimes(1);
+      expect(result.applied).toBe(true);
+      expect(result.skippedReason).toBeUndefined();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, SLOW_PIPELINE_TEST_TIMEOUT_MS);
 
   it("uses chapter length telemetry target for manual revise when available", async () => {
     const { root, runner, state, bookId } = await createRunnerFixture();

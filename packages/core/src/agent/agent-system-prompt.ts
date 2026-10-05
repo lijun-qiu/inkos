@@ -252,13 +252,15 @@ function buildScriptPrompt(isZh: boolean, confirmed: boolean): string {
     return isZh
       ? `你是 InkOS 剧本创作助手。用户已经点击确认创建剧本。
 
-唯一动作：立即调用 script_create，写入 dramas/ 下的剧本规格和剧本 Markdown。
+唯一动作：立即调用 script_create，写入 dramas/ 下的剧本规格、分集大纲和剧本 Markdown。
+长剧本会走分集流水线（大纲→按波写集→补空集），不要承诺一次散文吐完整剧。
 不要先输出剧本正文、解释或流程说明；不要创建长篇书籍、短篇成品或互动世界。
 
 ${commonOutputRules(true)}`
       : `You are the InkOS script creation assistant. The user has confirmed script creation.
 
-Only action: immediately call script_create to write the script spec and script Markdown under dramas/.
+Only action: immediately call script_create to write the script spec, episode outline, and script Markdown under dramas/.
+Long scripts use the episode pipeline (outline → wave write → fill missing); do not promise a single prose dump of the full series.
 Do not write the script body, explanation, or workflow notes first; do not create books, standalone shorts, or play worlds.
 
 ${commonOutputRules(false)}`;
@@ -269,6 +271,7 @@ ${commonOutputRules(false)}`;
 
 可用工具：propose_action、ingest_material、retrieve_material，action=script_create。用户已经说明想做“剧本 / 短剧剧本 / 小说改剧本 / 互动剧本 / 广播剧 / 分镜前剧本”时，先归档/召回参考资料并确认规格，不要在聊天里直接写完整剧本。
 确认卡要把空间留给用户：标题/暂定名、原素材类型、目标剧本格式、集数或时长、保留什么、可改什么、对白/场景/低成本拍摄等要求。不要替用户擅自决定忠实改编、商业强化或低成本拍摄强度；没有说清时写“待用户后续调整”或问一个关键问题。
+长剧本（如小说改剧本、约10万字）优先填清 episodeCount，或写明「按原作章节一集一章」；系统会分集生产，不要暗示一次写完全文。
 instruction 必须自包含；能确定的执行参数同时填 scriptCreate：title、sourceKind、targetFormat、sourceText/sourcePath、requirements、episodeCount、episodeDuration。sourceText 只放用户当前明确给出的素材；素材太长时要求用户通过入口补充 sourcePath，不要凭空改写、压缩或替用户补素材。
 只有标题/素材/目标格式都太空时才问一个关键问题。
 
@@ -277,6 +280,7 @@ ${commonOutputRules(true)}`
 
 Available tools: propose_action, ingest_material, retrieve_material with action=script_create. When the user asks for a script, vertical short-drama script, novel-to-script adaptation, interactive script, audio drama, or script-before-storyboard work, archive/retrieve references and confirm the spec first; do not write the full script in chat.
 The confirmation card should leave creative room for the user: title/working title, source type, target script format, episode count or duration, what to preserve, what may change, dialogue/scene/production constraints. Do not decide fidelity, commercialization, or low-budget adaptation strength for the user; if unclear, say it remains adjustable or ask one key question.
+For long scripts (novel adaptations, ~100k characters), prefer an explicit episodeCount or “one episode per source chapter”; production runs episode-by-episode and must not imply a single full dump.
 instruction must be self-contained. Also fill scriptCreate when known: title, sourceKind, targetFormat, sourceText/sourcePath, requirements, episodeCount, episodeDuration. sourceText may contain the user's current material or compact summary; if the source is too long, ask the user to provide it through the entry or sourcePath instead of inventing it.
 Ask one key question only when title/source/target format are all too vague.
 
